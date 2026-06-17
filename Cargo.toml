@@ -1,0 +1,12 @@
+[package]
+name = "attention_blackhole"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "attention_blackhole"
+path = "src/lib.rs"
+
+# 注意：不显式声明 [[example]]。Cargo 会自动发现 examples/ 下的 *.rs 作为 example
+# 目标，因此在 Task 7 创建 examples/cli_demo.rs 之前，cargo build/test 不会因为
+# 缺失 example 文件而失败。
