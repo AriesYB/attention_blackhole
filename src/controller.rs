@@ -110,7 +110,11 @@ mod tests {
 
     fn active_on_target() -> TickInput {
         TickInput {
-            counts: TickCounts { keys: 5, mouse: 1, ..Default::default() },
+            counts: TickCounts {
+                keys: 5,
+                mouse: 1,
+                ..Default::default()
+            },
             on_target: true,
             idle: Duration::ZERO,
             dt: Duration::from_millis(100),
@@ -121,8 +125,12 @@ mod tests {
     #[test]
     fn tick_drives_growth_and_render() {
         let mut ctrl = Controller::new(ModelConfig::default(), true);
-        let mut prov = FixedProvider { input: active_on_target() };
-        let mut sink = Sink { frames: RefCell::new(vec![]) };
+        let mut prov = FixedProvider {
+            input: active_on_target(),
+        };
+        let mut sink = Sink {
+            frames: RefCell::new(vec![]),
+        };
         for _ in 0..10 {
             ctrl.tick(&mut prov, &mut sink, Duration::from_millis(100));
         }
@@ -134,8 +142,12 @@ mod tests {
     #[test]
     fn reaches_forced_break_under_sustained_work() {
         let mut ctrl = Controller::new(ModelConfig::default(), true);
-        let mut prov = FixedProvider { input: active_on_target() };
-        let mut sink = Sink { frames: RefCell::new(vec![]) };
+        let mut prov = FixedProvider {
+            input: active_on_target(),
+        };
+        let mut sink = Sink {
+            frames: RefCell::new(vec![]),
+        };
         // 大量 tick 足以填满到 100（数值上稳定增长）
         for _ in 0..200_000 {
             ctrl.tick(&mut prov, &mut sink, Duration::from_millis(100));
@@ -149,8 +161,12 @@ mod tests {
     #[test]
     fn force_off_never_forced() {
         let mut ctrl = Controller::new(ModelConfig::default(), false);
-        let mut prov = FixedProvider { input: active_on_target() };
-        let mut sink = Sink { frames: RefCell::new(vec![]) };
+        let mut prov = FixedProvider {
+            input: active_on_target(),
+        };
+        let mut sink = Sink {
+            frames: RefCell::new(vec![]),
+        };
         for _ in 0..200_000 {
             ctrl.tick(&mut prov, &mut sink, Duration::from_millis(100));
         }
@@ -161,8 +177,12 @@ mod tests {
     #[test]
     fn reset_clears_state() {
         let mut ctrl = Controller::new(ModelConfig::default(), true);
-        let mut prov = FixedProvider { input: active_on_target() };
-        let mut sink = Sink { frames: RefCell::new(vec![]) };
+        let mut prov = FixedProvider {
+            input: active_on_target(),
+        };
+        let mut sink = Sink {
+            frames: RefCell::new(vec![]),
+        };
         for _ in 0..1000 {
             ctrl.tick(&mut prov, &mut sink, Duration::from_millis(100));
         }

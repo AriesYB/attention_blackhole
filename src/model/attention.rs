@@ -82,7 +82,11 @@ mod tests {
 
     fn active_on_target() -> TickInput {
         TickInput {
-            counts: TickCounts { keys: 5, mouse: 1, ..Default::default() },
+            counts: TickCounts {
+                keys: 5,
+                mouse: 1,
+                ..Default::default()
+            },
             on_target: true,
             idle: Duration::ZERO,
             dt: dt_100ms(),
@@ -137,7 +141,10 @@ mod tests {
             b.tick(&active_on_target());
         }
         let off = TickInput {
-            counts: TickCounts { keys: 5, ..Default::default() },
+            counts: TickCounts {
+                keys: 5,
+                ..Default::default()
+            },
             on_target: false,
             idle: Duration::ZERO,
             dt: dt_100ms(),
@@ -203,7 +210,12 @@ mod tests {
         // 用带切窗/退格的分心输入预热，让 buffer 累积疲劳信号
         let mut m = AttentionModel::new(ModelConfig::default());
         let distracted = TickInput {
-            counts: TickCounts { keys: 10, backspaces: 5, switches: 20, ..Default::default() },
+            counts: TickCounts {
+                keys: 10,
+                backspaces: 5,
+                switches: 20,
+                ..Default::default()
+            },
             on_target: true,
             idle: Duration::ZERO,
             dt: dt_100ms(),
@@ -217,7 +229,10 @@ mod tests {
         let mut fresh = AttentionModel::new(ModelConfig::default());
         let load_after_reset = m.tick(&distracted);
         let load_fresh = fresh.tick(&distracted);
-        assert!((load_after_reset - load_fresh).abs() < 1e-9, "{load_after_reset} vs {load_fresh}");
+        assert!(
+            (load_after_reset - load_fresh).abs() < 1e-9,
+            "{load_after_reset} vs {load_fresh}"
+        );
     }
 
     #[test]

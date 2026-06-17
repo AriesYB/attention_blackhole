@@ -45,14 +45,20 @@ mod tests {
     fn scripted_provider_cycles() {
         let s = vec![
             TickInput {
-                counts: TickCounts { keys: 1, ..Default::default() },
+                counts: TickCounts {
+                    keys: 1,
+                    ..Default::default()
+                },
                 on_target: true,
                 idle: Duration::ZERO,
                 dt: Duration::from_millis(100),
                 key_intervals_ms: vec![],
             },
             TickInput {
-                counts: TickCounts { keys: 2, ..Default::default() },
+                counts: TickCounts {
+                    keys: 2,
+                    ..Default::default()
+                },
                 on_target: true,
                 idle: Duration::ZERO,
                 dt: Duration::from_millis(100),
@@ -68,7 +74,11 @@ mod tests {
     #[test]
     fn collecting_renderer_records() {
         let mut r = CollectingRenderer::default();
-        r.render(&Frame { load: 1.0, state: crate::model::state::AppState::Working, on_target: true });
+        r.render(&Frame {
+            load: 1.0,
+            state: crate::model::state::AppState::Working,
+            on_target: true,
+        });
         assert_eq!(r.frames.len(), 1);
     }
 }

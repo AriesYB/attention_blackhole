@@ -17,19 +17,38 @@ impl SignalProvider for TimelineProvider {
         let prev = self.t_secs;
         self.t_secs += dt.as_secs_f64();
 
-        let typing_phase = prev < 40.0 * 60.0 || prev >= 46.0 * 60.0;
         let idle_phase = ((40.0 * 60.0)..(46.0 * 60.0)).contains(&prev);
+        let typing_phase = !idle_phase;
 
         let counts = if typing_phase {
             // 分心：有切窗 + 退格，体现 fatigue 加速
-            TickCounts { keys: 6, mouse: 1, switches: 2, backspaces: 2 }
+            TickCounts {
+                keys: 6,
+                mouse: 1,
+                switches: 2,
+                backspaces: 2,
+            }
         } else {
             TickCounts::default()
         };
-        let intervals = if typing_phase { vec![150.0, 400.0] } else { vec![] };
-        let idle = if idle_phase { Duration::from_secs(60) } else { Duration::ZERO };
+        let intervals = if typing_phase {
+            vec![150.0, 400.0]
+        } else {
+            vec![]
+        };
+        let idle = if idle_phase {
+            Duration::from_secs(60)
+        } else {
+            Duration::ZERO
+        };
 
-        TickInput { counts, on_target: typing_phase, idle, dt, key_intervals_ms: intervals }
+        TickInput {
+            counts,
+            on_target: typing_phase,
+            idle,
+            dt,
+            key_intervals_ms: intervals,
+        }
     }
 }
 

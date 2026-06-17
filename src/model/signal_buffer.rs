@@ -146,7 +146,14 @@ mod tests {
         let mut b = SignalBuffer::new(60.0);
         let c = cfg();
         for t in 0..10 {
-            b.push(t as f64, TickCounts { keys: 4, ..Default::default() }, &[200.0, 200.0]);
+            b.push(
+                t as f64,
+                TickCounts {
+                    keys: 4,
+                    ..Default::default()
+                },
+                &[200.0, 200.0],
+            );
         }
         assert!((b.focus_factor(&c) - c.focus_min).abs() < 1e-9);
     }
@@ -157,7 +164,12 @@ mod tests {
         let c = cfg();
         b.push(
             0.0,
-            TickCounts { keys: 10, backspaces: 5, switches: 20, ..Default::default() },
+            TickCounts {
+                keys: 10,
+                backspaces: 5,
+                switches: 20,
+                ..Default::default()
+            },
             &[100.0, 500.0],
         );
         // jitter = stddev([100,500]) = 200; norm = 200/500 = 0.4
@@ -172,7 +184,14 @@ mod tests {
     fn typing_jitter_matches_population_stddev() {
         // 直接锁住 population stddev 契约，防止 n vs n-1 等静默回归
         let mut b = SignalBuffer::new(60.0);
-        b.push(0.0, TickCounts { keys: 3, ..Default::default() }, &[100.0, 200.0, 300.0]);
+        b.push(
+            0.0,
+            TickCounts {
+                keys: 3,
+                ..Default::default()
+            },
+            &[100.0, 200.0, 300.0],
+        );
         // mean=200, var=((100-200)^2 + 0 + (300-200)^2)/3 = 20000/3, sqrt ~= 81.6497
         let expected = (20_000.0_f64 / 3.0).sqrt();
         assert!((b.typing_jitter_ms() - expected).abs() < 1e-6);
@@ -181,8 +200,22 @@ mod tests {
     #[test]
     fn window_evicts_old_samples() {
         let mut b = SignalBuffer::new(10.0);
-        b.push(0.0, TickCounts { keys: 100, ..Default::default() }, &[]);
-        b.push(20.0, TickCounts { keys: 1, ..Default::default() }, &[]);
+        b.push(
+            0.0,
+            TickCounts {
+                keys: 100,
+                ..Default::default()
+            },
+            &[],
+        );
+        b.push(
+            20.0,
+            TickCounts {
+                keys: 1,
+                ..Default::default()
+            },
+            &[],
+        );
         assert_eq!(b.total_keys(), 1);
     }
 }

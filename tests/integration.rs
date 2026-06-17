@@ -1,14 +1,19 @@
 use std::time::Duration;
 
 use attention_blackhole::controller::Controller;
+use attention_blackhole::mock::{CollectingRenderer, ScriptedProvider};
 use attention_blackhole::model::config::ModelConfig;
 use attention_blackhole::model::state::AppState;
 use attention_blackhole::model::types::{TickCounts, TickInput};
-use attention_blackhole::mock::{CollectingRenderer, ScriptedProvider};
 
 fn active_distracted() -> TickInput {
     TickInput {
-        counts: TickCounts { keys: 6, mouse: 1, switches: 2, backspaces: 2 },
+        counts: TickCounts {
+            keys: 6,
+            mouse: 1,
+            switches: 2,
+            backspaces: 2,
+        },
         on_target: true,
         idle: Duration::ZERO,
         dt: Duration::from_millis(100),
