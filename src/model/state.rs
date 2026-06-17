@@ -63,7 +63,7 @@ mod tests {
     }
 
     #[test]
-    fn never_forced_when_force_off() {
+    fn never_enters_forced_when_force_off() {
         let c = cfg();
         assert_eq!(next_state(AppState::Working, 100.0, false, &c), AppState::Dimming);
     }
@@ -73,8 +73,12 @@ mod tests {
         let c = cfg();
         // load 在 unlock(70) 与 dim(80) 之间：仍在 ForcedBreak
         assert_eq!(next_state(AppState::ForcedBreak, 75.0, true, &c), AppState::ForcedBreak);
+        // 精确边界：unlock 用严格 `<`，故 load==70 仍停留
+        assert_eq!(next_state(AppState::ForcedBreak, 70.0, true, &c), AppState::ForcedBreak);
         // 跌破 unlock：按 load 分类（>=dim -> Dimming，这里 <80 -> Working）
         assert_eq!(next_state(AppState::ForcedBreak, 69.0, true, &c), AppState::Working);
         assert_eq!(next_state(AppState::ForcedBreak, 85.0, true, &c), AppState::ForcedBreak);
+        // force_off 不解除进行中的休息：退出 ForcedBreak 仅由 load 决定（设计上的滞后）
+        assert_eq!(next_state(AppState::ForcedBreak, 75.0, false, &c), AppState::ForcedBreak);
     }
 }
