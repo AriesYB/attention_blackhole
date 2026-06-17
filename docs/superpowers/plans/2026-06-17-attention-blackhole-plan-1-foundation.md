@@ -63,11 +63,9 @@ edition = "2021"
 [lib]
 name = "attention_blackhole"
 path = "src/lib.rs"
-
-[[example]]
-name = "cli_demo"
-path = "examples/cli_demo.rs"
 ```
+
+> 注意：**不要**在 `Cargo.toml` 里声明 `[[example]]`。Cargo 会自动发现 `examples/` 下的 `*.rs` 作为 example 目标；若现在就声明指向尚不存在的 `examples/cli_demo.rs`（Task 7 才创建），则 Task 1–6 的 `cargo build` / `cargo test` 会因找不到 example 文件而失败。Task 7 创建该文件后即被自动识别，无需改 `Cargo.toml`。
 
 - [ ] **Step 2: 写 lib.rs 与 model/mod.rs**
 
@@ -559,7 +557,9 @@ mod tests {
         let cfg = ModelConfig::default();
         let mut a = AttentionModel::new(cfg);
         let mut b = AttentionModel::new(cfg);
-        for _ in 0..200 {
+        // 充分预热：让 load 远超 shrink 阶段会移除的量（off-target 60s 移除 4.0，idle 60s 移除 6.0）。
+        // 否则两者都被夹到 0，4/min 与 6/min 的速率差异不可见。6000 ticks ≈ 12 load。
+        for _ in 0..6000 {
             a.tick(&active_on_target());
             b.tick(&active_on_target());
         }
