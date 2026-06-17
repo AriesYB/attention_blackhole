@@ -1,2 +1,6 @@
 /target
 *.pdb
+
+# opencode tool local config (not project source)
+/opencode.json
+.opencode/
