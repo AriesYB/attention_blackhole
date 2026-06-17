@@ -66,6 +66,9 @@ impl Controller {
         let on_target = input.on_target;
         self.model.tick(&input);
 
+        // force 关闭时把 load 封顶到 forced-1：next_state 本就不会进入 ForcedBreak
+        // （state.rs 进入条件含 force_enabled），这里的封顶是语义层——保证对外
+        // 查询/渲染的 load 永不显示 100%，避免误导用户「已到极限」。
         if !self.force_enabled {
             self.model.cap_at(self.config.forced_threshold - 1.0);
         }

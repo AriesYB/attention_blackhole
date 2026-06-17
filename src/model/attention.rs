@@ -25,8 +25,12 @@ impl AttentionModel {
         self.load
     }
 
+    /// 真正的「冷启动」重置：清零 load、时钟与信号历史。
+    /// 这样手动「我休息好了」后，疲劳/专注因子不会带着休息前的陈旧数据。
     pub fn reset(&mut self) {
         self.load = 0.0;
+        self.clock = 0.0;
+        self.buffer.clear();
     }
 
     /// 把 load 强制封顶到 max（force 关闭时用，封顶 99% 等效）。
@@ -192,6 +196,28 @@ mod tests {
         }
         m.reset();
         assert_eq!(m.load(), 0.0);
+    }
+
+    #[test]
+    fn reset_clears_signal_history() {
+        // 用带切窗/退格的分心输入预热，让 buffer 累积疲劳信号
+        let mut m = AttentionModel::new(ModelConfig::default());
+        let distracted = TickInput {
+            counts: TickCounts { keys: 10, backspaces: 5, switches: 20, ..Default::default() },
+            on_target: true,
+            idle: Duration::ZERO,
+            dt: dt_100ms(),
+            key_intervals_ms: vec![100.0, 500.0],
+        };
+        for _ in 0..100 {
+            m.tick(&distracted);
+        }
+        m.reset();
+        // 重置后再 tick 一次，应与全新 model 做同样单 tick 的结果一致（buffer 已清空）
+        let mut fresh = AttentionModel::new(ModelConfig::default());
+        let load_after_reset = m.tick(&distracted);
+        let load_fresh = fresh.tick(&distracted);
+        assert!((load_after_reset - load_fresh).abs() < 1e-9, "{load_after_reset} vs {load_fresh}");
     }
 
     #[test]

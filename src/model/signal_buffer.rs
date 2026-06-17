@@ -19,6 +19,12 @@ impl SignalBuffer {
         }
     }
 
+    /// 清空所有滚动窗口历史（用于 reset 的冷启动）。
+    pub fn clear(&mut self) {
+        self.events.clear();
+        self.intervals.clear();
+    }
+
     pub fn push(&mut self, now: f64, counts: TickCounts, intervals_ms: &[f64]) {
         for &ms in intervals_ms {
             self.intervals.push_back((now, ms));
