@@ -15,6 +15,12 @@ pub trait Renderer {
     fn render(&mut self, frame: &Frame);
 }
 
+/// 渲染帧数据。
+///
+/// **有意不包含窗口矩形 (rect)**：rect 是平台概念（HWND / WindowId / 监视器坐标），
+/// 应由平台层渲染器自行从其 `WindowTracker` 获取。把 rect 塞进 `Frame` 会让
+/// 平台类型渗入这个纯 Rust 核心，破坏「核心无平台依赖」的分层。`Frame` 只承载
+/// 与注意力模型相关的纯值类型。
 #[derive(Debug, Clone, Copy)]
 pub struct Frame {
     pub load: f64,
@@ -87,7 +93,6 @@ impl Controller {
 mod tests {
     use super::*;
     use crate::model::types::TickCounts;
-    use std::cell::RefCell;
 
     /// 固定返回同一输入的 provider。
     struct FixedProvider {
@@ -100,11 +105,11 @@ mod tests {
     }
 
     struct Sink {
-        frames: RefCell<Vec<Frame>>,
+        frames: Vec<Frame>,
     }
     impl Renderer for Sink {
         fn render(&mut self, frame: &Frame) {
-            self.frames.borrow_mut().push(*frame);
+            self.frames.push(*frame);
         }
     }
 
@@ -128,15 +133,13 @@ mod tests {
         let mut prov = FixedProvider {
             input: active_on_target(),
         };
-        let mut sink = Sink {
-            frames: RefCell::new(vec![]),
-        };
+        let mut sink = Sink { frames: vec![] };
         for _ in 0..10 {
             ctrl.tick(&mut prov, &mut sink, Duration::from_millis(100));
         }
         assert!(ctrl.load() > 0.0);
-        assert_eq!(sink.frames.borrow().len(), 10);
-        assert!(sink.frames.borrow().last().unwrap().on_target);
+        assert_eq!(sink.frames.len(), 10);
+        assert!(sink.frames.last().unwrap().on_target);
     }
 
     #[test]
@@ -145,9 +148,7 @@ mod tests {
         let mut prov = FixedProvider {
             input: active_on_target(),
         };
-        let mut sink = Sink {
-            frames: RefCell::new(vec![]),
-        };
+        let mut sink = Sink { frames: vec![] };
         // 大量 tick 足以填满到 100（数值上稳定增长）
         for _ in 0..200_000 {
             ctrl.tick(&mut prov, &mut sink, Duration::from_millis(100));
@@ -164,9 +165,7 @@ mod tests {
         let mut prov = FixedProvider {
             input: active_on_target(),
         };
-        let mut sink = Sink {
-            frames: RefCell::new(vec![]),
-        };
+        let mut sink = Sink { frames: vec![] };
         for _ in 0..200_000 {
             ctrl.tick(&mut prov, &mut sink, Duration::from_millis(100));
         }
@@ -180,9 +179,7 @@ mod tests {
         let mut prov = FixedProvider {
             input: active_on_target(),
         };
-        let mut sink = Sink {
-            frames: RefCell::new(vec![]),
-        };
+        let mut sink = Sink { frames: vec![] };
         for _ in 0..1000 {
             ctrl.tick(&mut prov, &mut sink, Duration::from_millis(100));
         }

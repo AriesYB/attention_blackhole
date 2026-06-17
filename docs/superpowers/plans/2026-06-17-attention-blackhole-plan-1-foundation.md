@@ -1263,3 +1263,23 @@ git commit -m "test: end-to-end lifecycle, reset, and force-disabled integration
 - `cargo run --example cli_demo` 能观察到「涨 → ForcedBreak → 空闲缩 → 解锁」完整循环。
 - `model/` 与 `controller/` 全平台无关、零外部依赖；`platform/`、`renderer/` 尚未存在（留给 Plan 2/3）。
 - trait `SignalProvider` / `Renderer` 已定义并被 mock 实现，后续 plan 直接替换为真实实现。
+
+---
+
+## 终审遗留项（final review 后记录，留给后续 plan）
+
+终审（@oracle holistic review, 2026-06-17）结论 **GO merge**，无 blocker。以下两项 should-fix 在 Plan 1 范围外、不可达，记录如下供后续 plan 处理：
+
+1. **增长校准与宣称速率不一致**（→ Plan 2+ 真实信号调参）：
+   `growth_per_min=2.0` 是**系数**而非**有效速率**。有效增长 = `growth × focus × fatigue`，
+   深度专注（jitter≈25ms → focus≈0.62、fatigue≈1.015）实测 ≈ **1.26 %/min**（填满需 ~80 min），
+   而分心模式（focus≈0.70、fatigue=2.0 clamp）才接近宣称的 ~2.8 %/min（~36 min 填满）。
+   spec §6.2/§14 本就声明「经实测调参」，故 Plan 1 不调；待 Plan 2 接入真实 Windows 信号后统一校准，
+   届时可能把 `growth_per_min` 提到 ~3.0 或调整 focus/fatigue 曲线。
+
+2. **`ModelConfig` 无校验**（→ 引入配置加载的 plan，预计 Plan 5 Tauri shell）：
+   当前全 `pub` + `Default`，未来从 TOML 加载时需加 `validate() -> Result`：
+   - 断言 `unlock < dim ≤ forced`（否则状态机退化）
+   - 断言 `*_shrink_per_min > 0`（否则 `idle_shrink=0` 会让用户**永远困在 ForcedBreak**，只能 `reset()` 救场）
+   - 把 5-min 不变量 `(forced - unlock) / idle_shrink ≈ idle_auto_release_minutes` 从单测挪进校验逻辑
+
