@@ -154,10 +154,22 @@ mod tests {
             TickCounts { keys: 10, backspaces: 5, switches: 20, ..Default::default() },
             &[100.0, 500.0],
         );
+        // jitter = stddev([100,500]) = 200; norm = 200/500 = 0.4
+        // -> focus = focus_min + (focus_max - focus_min) * 0.4 = 0.6 + 0.4*0.4 = 0.76
         let f = b.focus_factor(&c);
-        assert!(f > c.focus_min);
+        assert!((f - 0.76).abs() < 1e-9, "focus = {f}");
         let fat = b.fatigue_factor(1.0, &c);
         assert!((fat - c.fatigue_max).abs() < 1e-9);
+    }
+
+    #[test]
+    fn typing_jitter_matches_population_stddev() {
+        // 直接锁住 population stddev 契约，防止 n vs n-1 等静默回归
+        let mut b = SignalBuffer::new(60.0);
+        b.push(0.0, TickCounts { keys: 3, ..Default::default() }, &[100.0, 200.0, 300.0]);
+        // mean=200, var=((100-200)^2 + 0 + (300-200)^2)/3 = 20000/3, sqrt ~= 81.6497
+        let expected = (20_000.0_f64 / 3.0).sqrt();
+        assert!((b.typing_jitter_ms() - expected).abs() < 1e-6);
     }
 
     #[test]
