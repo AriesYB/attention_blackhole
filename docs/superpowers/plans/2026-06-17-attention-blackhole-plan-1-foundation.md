@@ -1064,7 +1064,7 @@ git commit -m "feat: mock provider and collecting renderer for tests/demo"
 **Files:**
 - Create: `examples/cli_demo.rs`
 
-模拟 1 小时时间线：前段「分心式」输入让 load 涨到 ForcedBreak，中段空闲 5 分钟触发自动解锁，演示完整循环。每模拟分钟打印一行。
+模拟 1 小时时间线：前段「分心式」输入让 load 涨到 ForcedBreak，中段空闲 6 分钟（足以跌破 unlock=70）触发自动解锁，演示完整循环。每模拟分钟打印一行。
 
 - [ ] **Step 1: 写 example**
 
@@ -1079,8 +1079,8 @@ use attention_blackhole::model::types::{TickCounts, TickInput};
 
 /// 模拟时间线 provider：
 ///  - 0..40 min：分心式输入（on_target、活跃、有切窗/退格）-> load 上升
-///  - 40..45 min：空闲（真休息）-> load 衰减
-///  - 45..60 min：恢复活跃
+///  - 40..46 min：空闲（真休息，6 min 足以把 load 从 100 降到 ~64、跌破 unlock=70）-> 衰减并解锁
+///  - 46..60 min：恢复活跃
 struct TimelineProvider {
     t_secs: f64,
 }
@@ -1090,8 +1090,8 @@ impl SignalProvider for TimelineProvider {
         let prev = self.t_secs;
         self.t_secs += dt.as_secs_f64();
 
-        let typing_phase = prev < 40.0 * 60.0 || prev >= 45.0 * 60.0;
-        let idle_phase = ((40.0 * 60.0)..(45.0 * 60.0)).contains(&prev);
+        let typing_phase = prev < 40.0 * 60.0 || prev >= 46.0 * 60.0;
+        let idle_phase = ((40.0 * 60.0)..(46.0 * 60.0)).contains(&prev);
 
         let counts = if typing_phase {
             // 分心：有切窗 + 退格，体现 fatigue 加速
@@ -1135,7 +1135,7 @@ fn main() {
 - [ ] **Step 2: 运行 demo 验证**
 
 Run: `cargo run --example cli_demo`
-Expected: 打印约 60 行；load 在前 ~30 多分钟上升、触发 `ForcedBreak`，40–45 min 区间因空闲衰减、`load` 跌破 70 后状态回到 `Working`/`Dimming`，随后再次上升。具体数值依实现细节，但应观察到「涨 → ForcedBreak → 空闲缩 → 解锁」的完整循环。
+Expected: 打印约 60 行；load 在前 ~30 多分钟上升、触发 `ForcedBreak`，40–46 min 区间因空闲衰减、`load` 跌破 70 后状态回到 `Working`/`Dimming`，随后再次上升。具体数值依实现细节，但应观察到「涨 → ForcedBreak → 空闲缩 → 解锁」的完整循环。
 
 > 说明：本步骤为视觉/行为验证，无自动断言。若 load 未在 40 min 内到 100，说明 fatigue/focus 校准偏慢，可在 `ModelConfig` 微调（非本计划目标，留作实测调参）。
 
