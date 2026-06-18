@@ -151,7 +151,7 @@ impl WgcCaptureSource {
                 let pool = pool.as_ref().ok_or_else(|| {
                     windows::core::Error::from(windows::Win32::Foundation::E_POINTER)
                 })?;
-                let frame = unsafe { pool.TryGetNextFrame() }?;
+                let frame = pool.TryGetNextFrame()?;
                 let surface = frame.Surface()?;
                 let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
                 let texture: ID3D11Texture2D = unsafe { access.GetInterface() }?;
@@ -231,7 +231,7 @@ impl CaptureSource for WgcCaptureSource {
         }
         self.active = active;
         if active {
-            if let Err(e) = unsafe { self.session.StartCapture() } {
+            if let Err(e) = self.session.StartCapture() {
                 eprintln!("WgcCaptureSource: StartCapture failed: {:?}", e);
                 self.active = false;
             }
