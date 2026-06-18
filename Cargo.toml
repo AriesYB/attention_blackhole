@@ -10,3 +10,14 @@ path = "src/lib.rs"
 # 注意：不显式声明 [[example]]。Cargo 会自动发现 examples/ 下的 *.rs 作为 example
 # 目标，因此在 Task 7 创建 examples/cli_demo.rs 之前，cargo build/test 不会因为
 # 缺失 example 文件而失败。
+
+# platform 层（Plan 2）需要 windows crate。cfg-gated：非 windows 平台不拉依赖，
+# 保证 model/controller 核心在任意平台零外部依赖。
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.61"
+features = [
+    "Win32_Foundation",             # BOOL / HANDLE / LPARAM 等
+    "Win32_UI_WindowsAndMessaging", # SetWindowsHookExW / WH_*_LL / KBDLLHOOKSTRUCT
+                                    #   GetForegroundWindow / GetWindowTextW
+                                    #   GetMessageW / PeekMessageW / PostThreadMessageW
+]

@@ -1,0 +1,10 @@
+# 本项目 pin 到 MSVC toolchain。
+#
+# 原因：Plan 2 起 platform/ 层依赖 `windows` crate，它要求 MSVC ABI（GNU 链的
+# dlltool 无法生成其 import library）；Plan 3+ 的 D3D11/WGC 同样依赖 MSVC link.exe
+# 与 Windows SDK。pin 在仓库级，避免依赖每个开发者记忆加 `+stable-msvc` 前缀。
+#
+# 注意：仍需本机安装 Visual Studio Build Tools（提供 link.exe / Windows SDK）。
+[toolchain]
+channel = "stable-x86_64-pc-windows-msvc"
+profile = "minimal"
