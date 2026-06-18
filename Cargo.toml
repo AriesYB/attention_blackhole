@@ -22,4 +22,9 @@ features = [
     "Win32_UI_WindowsAndMessaging", # SetWindowsHookExW / WH_*_LL / KBDLLHOOKSTRUCT
                                     #   GetForegroundWindow / GetWindowTextW
                                     #   GetMessageW / PostThreadMessageW / CallNextHookEx
+    # Plan 3 —— D3D11 渲染设备与交换链
+    "Win32_Graphics_Direct3D",      # D3D_FEATURE_LEVEL_* / D3D11CreateDevice
+    "Win32_Graphics_Direct3D11",    # ID3D11Device / ID3D11DeviceContext / ID3D11Texture2D 等
+    "Win32_Graphics_Dxgi",          # IDXGIDevice / IDXGISwapChain / IDXGIFactory
+    "Win32_Graphics_Dxgi_Common",   # DXGI_FORMAT / DXGI_SWAP_CHAIN_DESC（desc 引用公共类型）
 ]
