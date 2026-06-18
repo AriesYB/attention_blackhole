@@ -27,4 +27,7 @@ features = [
     "Win32_Graphics_Direct3D11",    # ID3D11Device / ID3D11DeviceContext / ID3D11Texture2D 等
     "Win32_Graphics_Dxgi",          # IDXGIDevice / IDXGISwapChain / IDXGIFactory
     "Win32_Graphics_Dxgi_Common",   # DXGI_FORMAT / DXGI_SWAP_CHAIN_DESC（desc 引用公共类型）
+    "Win32_Graphics_Gdi",           # RegisterClassExW / WNDCLASSEXW / HINSTANCE（窗口类注册历史耦合 GDI）
+    "Win32_Graphics_Dwm",           # DWM 命名空间（DwmExtendFrameIntoClientArea 入口）
+    "Win32_UI_Controls",            # MARGINS + DwmExtendFrameIntoClientArea 实现（DWM API 实际落在 Controls）
 ]
