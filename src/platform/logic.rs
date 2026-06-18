@@ -2,6 +2,12 @@
 //!
 //! 把「可测的数学」从「不可测的 Win32 调用」里剥出来：增量计数聚合、
 //! idle 时长计算、标题子串匹配、击键间隔记录。
+//!
+//! 生产路径（Win32SignalProvider）部分用原子直接算（见 input_hook），本模块的
+//! Counts/IdleTracker/KeyIntervals 作为「纯逻辑可测基准」保留，单测覆盖其数学正确性，
+//! 供未来扩展或对照验证。因此对未在非测试代码引用的项标注 allow(dead_code)。
+
+#![allow(dead_code)]
 
 use std::time::{Duration, Instant};
 
@@ -49,6 +55,9 @@ impl Counts {
 
 /// 基于「最后一次输入时间戳」的空闲计算。时间来源由调用方注入（生产用
 /// `Instant::now()`，测试用 fake），保证纯逻辑可测。
+///
+/// 注：生产路径（Win32SignalProvider）用 hook 的 `last_input_ms` 原子直接算 idle，
+/// 本结构作为「纯逻辑可测基准」保留（单测覆盖 idle 数学正确性）。
 #[derive(Debug, Clone)]
 pub struct IdleTracker {
     last_input: Instant,
