@@ -17,6 +17,7 @@ path = "src/lib.rs"
 version = "0.61"
 features = [
     "Win32_Foundation",             # BOOL / HANDLE / LPARAM / WPARAM / LRESULT 等
+    "Win32_System_LibraryLoader",   # GetModuleHandleW（SetWindowsHookExW 的 hMod）
     "Win32_System_Threading",       # GetCurrentThreadId（hook 线程 id 回传）
     "Win32_UI_WindowsAndMessaging", # SetWindowsHookExW / WH_*_LL / KBDLLHOOKSTRUCT
                                     #   GetForegroundWindow / GetWindowTextW

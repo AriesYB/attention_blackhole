@@ -44,6 +44,23 @@ impl Win32SignalProvider {
             start,
         })
     }
+
+    /// 诊断：返回 hook 线程的执行进度码（供 demo 排查为何不计数）。
+    /// 0 未启 / 1 已注入状态 / 2 键盘hook装上 / 3 鼠标hook装上 / 4 进入泵 / 99 失败。
+    pub fn hook_diag(&self) -> u32 {
+        self.hook.diag.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 诊断：返回回调被系统调用的总次数（key+mouse 不分类型）。
+    /// 用于隔离「回调没触发」vs「thread_local 读不到」。
+    pub fn cb_fired(&self) -> i64 {
+        input_hook::CB_FIRED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 诊断：返回 key_proc 被调用的次数（隔离键盘回调是否触发）。
+    pub fn key_cb(&self) -> i64 {
+        input_hook::KEY_CB.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[cfg(windows)]

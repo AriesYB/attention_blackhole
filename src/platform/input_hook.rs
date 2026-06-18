@@ -14,11 +14,11 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::{
-    self as wm, CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, HHOOK,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_QUIT,
-    WM_RBUTTONDOWN, WM_SYSKEYDOWN,
+    self as wm, CallNextHookEx, DispatchMessageW, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT,
+    PeekMessageW, PM_REMOVE, TranslateMessage, HHOOK, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_QUIT, WM_RBUTTONDOWN, WM_SYSKEYDOWN,
 };
 
 use super::logic::Counts;
@@ -71,6 +71,8 @@ pub struct InputHook {
     pub counts: Arc<AtomicCounts>,
     pub key_times: Arc<Mutex<Vec<Instant>>>,
     pub last_input_ms: Arc<AtomicI64>,
+    /// 诊断：hook 线程进度（0 未启 1 注入状态 2 键盘hook 3 鼠标hook 4 进泵 99 失败）。
+    pub diag: Arc<AtomicU32>,
 }
 
 impl InputHook {
@@ -80,11 +82,15 @@ impl InputHook {
         let key_times = Arc::new(Mutex::new(Vec::with_capacity(MAX_KEYS)));
         let last_input_ms = Arc::new(AtomicI64::new(0));
         let thread_id = Arc::new(AtomicU32::new(0));
+        // 诊断：hook 线程执行进度（供排查为何不计数）。
+        // 0=未启动 1=已注入状态 2=键盘hook装上 3=鼠标hook装上 4=进入泵 99=失败
+        let diag = Arc::new(AtomicU32::new(0));
 
         let counts_t = counts.clone();
         let key_times_t = key_times.clone();
         let last_t = last_input_ms.clone();
         let thread_id_t = thread_id.clone();
+        let diag_t = diag.clone();
 
         let handle = thread::Builder::new()
             .name("abh-input-hook".into())
@@ -101,27 +107,52 @@ impl InputHook {
                         start: Instant::now(),
                     });
                 });
+                diag_t.store(1, Ordering::SeqCst);
 
                 unsafe {
-                    let kb = match wm::SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_proc), None, 0) {
-                        Ok(h) => h,
-                        Err(_) => return,
-                    };
-                    let ms = match wm::SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0) {
+                    // LL hook 要求 hMod；用当前进程模块句柄（全局 hook 不注入其它进程，
+                    // 传进程模块即可）。文档建议传模块句柄而非 NULL 以保证稳定。
+                    // GetModuleHandleW 返回 HMODULE；SetWindowsHookExW 要 Option<HINSTANCE>。
+                    // 两者底层都是指针，通过 .into() / as 转换；失败则传 None（NULL）。
+                    let hmod = GetModuleHandleW(None)
+                        .ok()
+                        .map(|m| windows::Win32::Foundation::HINSTANCE(m.0));
+
+                    let kb = match wm::SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_proc), hmod, 0) {
                         Ok(h) => h,
                         Err(_) => {
-                            let _ = wm::UnhookWindowsHookEx(kb);
+                            diag_t.store(99, Ordering::SeqCst);
                             return;
                         }
                     };
+                    diag_t.store(2, Ordering::SeqCst);
+                    let ms = match wm::SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod, 0) {
+                        Ok(h) => h,
+                        Err(_) => {
+                            let _ = wm::UnhookWindowsHookEx(kb);
+                            diag_t.store(99, Ordering::SeqCst);
+                            return;
+                        }
+                    };
+                    diag_t.store(3, Ordering::SeqCst);
 
-                    // 消息泵：直到收到 WM_QUIT。GetMessageW 对 WM_QUIT 返回 0，
-                    // 对错误返回 -1（<0），其它消息返回正数。
+                    // 标准消息泵：PeekMessage(PM_REMOVE) 主动轮询 + TranslateMessage +
+                    // DispatchMessage。LL hook 回调仅在「安装线程正在 dispatch 消息」时
+                    // 由系统触发；若线程长时间阻塞（LowLevelHooksTimeout 默认 300ms），
+                    // Windows 会静默移除 hook。故用 PeekMessage 主动取消息而非 GetMessage
+                    // 阻塞，并在无消息时短暂 sleep 让线程保持响应。
                     let mut msg = wm::MSG::default();
+                    diag_t.store(4, Ordering::SeqCst);
                     loop {
-                        let r = GetMessageW(&mut msg, None, 0, 0);
-                        if r.0 <= 0 {
-                            break;
+                        if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).into() {
+                            if msg.message == WM_QUIT {
+                                break;
+                            }
+                            let _ = TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        } else {
+                            // 无消息：短暂让出，避免忙等，同时保持线程对 hook 派发的响应性。
+                            thread::sleep(std::time::Duration::from_millis(5));
                         }
                     }
 
@@ -143,6 +174,7 @@ impl InputHook {
             counts,
             key_times,
             last_input_ms,
+            diag,
         })
     }
 }
@@ -168,7 +200,15 @@ fn note_key(state: &CallbackState, is_backspace: bool) {
     note_input(state);
 }
 
+/// 诊断：回调被系统调用的总次数（key+mouse，不分类型）。
+/// 放在 thread_local 访问之前自增，用于隔离「回调没触发」vs「thread_local 读不到」。
+pub static CB_FIRED: AtomicI64 = AtomicI64::new(0);
+/// 诊断：key_proc 被调用的次数（隔离键盘回调是否触发）。
+pub static KEY_CB: AtomicI64 = AtomicI64::new(0);
+
 unsafe extern "system" fn key_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    CB_FIRED.fetch_add(1, Ordering::Relaxed);
+    KEY_CB.fetch_add(1, Ordering::Relaxed);
     // 仅 keydown 计一次，避免 up 重复。
     let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
     if is_down {
@@ -185,6 +225,7 @@ unsafe extern "system" fn key_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    CB_FIRED.fetch_add(1, Ordering::Relaxed);
     // 任意鼠标输入都刷新 last_input（spec §6.5：任何输入重置空闲）。
     // 但只有 button-down 计 mouse 计数（移动不计，避免淹没）。
     let is_button_down = wparam.0 == WM_LBUTTONDOWN as usize
