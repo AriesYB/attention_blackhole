@@ -14,5 +14,7 @@ mod input_hook;
 #[cfg(windows)]
 mod window_tracker;
 
-// Task 3 起在此 pub use window_tracker::WindowTracker;
+#[cfg(windows)]
+pub use window_tracker::WindowTracker;
+
 // Task 4 起在此定义 Win32SignalProvider 并 impl SignalProvider。
