@@ -144,3 +144,36 @@ const _: () = assert!(
     size_of::<FrameConstants>() == 32,
     "FrameConstants must be 32 bytes (two float4 slots) to match HLSL cbuffer packing"
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FrameConstants::new 字段映射正确（painter 据此驱动 shader uniform）。
+    #[test]
+    fn frame_constants_fields_mapped() {
+        let c = FrameConstants::new(0.5, 0.3, 12.5, (1920.0, 1080.0), true);
+        assert!((c.u_load - 0.5).abs() < 1e-6);
+        assert!((c.u_dim - 0.3).abs() < 1e-6);
+        assert!((c.u_time - 12.5).abs() < 1e-6);
+        assert_eq!(c.u_resolution, [1920.0, 1080.0]);
+        assert_eq!(c.u_has_capture, 1);
+    }
+
+    /// has_capture=false 时 u_has_capture=0（shader 据此走程序化背景分支）。
+    #[test]
+    fn frame_constants_no_capture_flag() {
+        let c = FrameConstants::new(0.0, 0.0, 0.0, (800.0, 600.0), false);
+        assert_eq!(c.u_has_capture, 0);
+    }
+
+    /// Default 产生全零（安全初值，渲染线程首帧前不会用未初始化内存）。
+    #[test]
+    fn frame_constants_default_zeroed() {
+        let c = FrameConstants::default();
+        assert_eq!(c.u_load, 0.0);
+        assert_eq!(c.u_has_capture, 0);
+        assert_eq!(c.u_resolution, [0.0, 0.0]);
+    }
+}
+

@@ -249,4 +249,29 @@ fn render_loop(
     capture.set_active(false);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 契约：D3D11Renderer 实现 Renderer trait（编译期断言）。
+    /// 不构造实例（需 GPU），仅证明类型关系成立——controller 经
+    /// `&mut dyn Renderer` 消费 D3D11Renderer 的契约在本 crate 编译时即被强制。
+    #[allow(dead_code)]
+    fn _assert_d3d11renderer_implements_renderer(r: &mut D3D11Renderer) -> &mut dyn Renderer {
+        r
+    }
+
+    /// RenderError::Windows 由 windows::core::Error 转换（painter/capture 依赖此 From）。
+    #[test]
+    fn render_error_from_windows_error() {
+        let e = windows::core::Error::from(windows::core::HRESULT(-1));
+        let r: RenderError = e.into();
+        match r {
+            RenderError::Windows(_) => {} // ok
+            other => panic!("expected RenderError::Windows, got {:?}", other),
+        }
+    }
+}
+
+
 

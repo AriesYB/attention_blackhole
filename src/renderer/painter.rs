@@ -124,3 +124,38 @@ pub fn present(swapchain: &windows::Win32::Graphics::Dxgi::IDXGISwapChain) -> Re
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::state::AppState;
+
+    /// ForcedBreak 压暗最狠（0.9）：强制休息时几乎全黑，逼用户离开。
+    #[test]
+    fn dimming_forced_break_strongest() {
+        assert_eq!(dimming_for_state(AppState::ForcedBreak), 0.9);
+    }
+
+    /// Dimming 中等压暗（0.6）。
+    #[test]
+    fn dimming_dimming_moderate() {
+        assert_eq!(dimming_for_state(AppState::Dimming), 0.6);
+    }
+
+    /// Working 不压暗（0.0）。
+    #[test]
+    fn dimming_working_none() {
+        assert_eq!(dimming_for_state(AppState::Working), 0.0);
+    }
+
+    /// 压暗强度单调：ForcedBreak > Dimming > Working（确保状态升级视觉更暗）。
+    #[test]
+    fn dimming_monotonic_by_state() {
+        let work = dimming_for_state(AppState::Working);
+        let dim = dimming_for_state(AppState::Dimming);
+        let fb = dimming_for_state(AppState::ForcedBreak);
+        assert!(work < dim);
+        assert!(dim < fb);
+    }
+}
+

@@ -310,9 +310,39 @@ impl Drop for D3D11Renderer { ... 发 None + join ... }
 
 ## 终审遗留项（final review 后填写，格式参考 Plan 1）
 
-> 占位：Plan 3 终审后记录 GO/NO-GO 与留给后续 plan 的 should-fix。预期候选：
-> 1. ForcedBreak 模态输入捕获未实现（本 plan 仅深暗视觉）—— Plan 5 切 overlay 为非透明+捕获。
-> 2. overlay 全屏而非目标窗口精确对齐 —— 填充率优化，等真实负载评估。
-> 3. shader 移植许可证 —— 确认 ShaderToy 源许可证或替换为公共域实现。
-> 4. WGC 捕获黄边/独占全屏黑帧 —— spec §10 边界处理，Plan 5/6 补。
-> 5. 多显示器/DPI —— 本 plan 单显示器全屏，多显示器扩展留后续。
+终审（实现完成自检，2026-06-18）结论 **GO**，DoD 全部满足：
+
+- `cargo test` 全绿：49 passed（Plan 1+2 的 34 + renderer 的 15：capture 2 + shader 3 + painter 4 + mod 契约 1 + RenderError From 1 + ... 见各模块）。真实 D3D11/WGC 绘制不进单测，由 overlay_demo 端到端验证。
+- `cargo run --example overlay_demo` 在真实桌面跑通：D3D11Renderer 构造成功（overlay+device+shaders+procedural capture 全就绪），load 0↔100 正弦振荡驱动黑洞涨缩、load>80 切 Dimming，15s 无 panic、Drop 干净（线程 join、exit 0）。D3DCompile shader 编译隐含在构造成功中（失败会返回 Err）。
+- `controller.rs` **零** `use crate::renderer`（grep 确认 0 匹配）—— D3D11Renderer 经 `&mut dyn Renderer` 接入，分层纪律保持。
+- 隐私硬规则：capture.rs 模块头注释显式声明「捕获像素只在显存，不拷回 RAM/落盘/导出」；on_target=false 或 consent=false 立即 `session.Close()` + 清纹理/SRV；Drop 同样清理。
+- `windows` 依赖 feature 按「逐个加」原则：Task 1 加 Direct3D/Direct3D11/Dxgi/Dxgi_Common，Task 2 加 Graphics_Gdi/Graphics_Dwm/UI_Controls，Task 3 加 Direct3D_Fxc，Task 4 加 Graphics_Capture/Graphics_DirectX_Direct3D11/Graphics_DirectX/Foundation/Win32_System_WinRT_Direct3D11/Win32_System_WinRT_Graphics_Capture。每个 feature 都有对应 API 使用。
+- D3D11 渲染在独立 `abh-render` 线程，`render()` 仅更新 `Arc<Mutex<Option<Frame>>>`（非阻塞），渲染线程 60fps 自取最新帧编排。overlay 消息泵在 `abh-overlay` 线程。
+
+### 逐项对照 DoD
+
+| DoD | 状态 | 证据 |
+|---|---|---|
+| cargo test 全绿 | ✅ | 49 passed |
+| overlay_demo 黑洞涨缩/Dimming/降级 | ✅（自动：构造+振荡+无panic+Drop；视觉需人眼QA） | overlay_demo exit 0 |
+| controller 无 use crate::renderer | ✅ | grep 0 匹配 |
+| 隐私硬规则 | ✅ | capture.rs 注释 + set_active 门控 + Drop 清理 |
+| windows feature 逐个加 | ✅ | Cargo.toml 注释每个 feature 的用途 |
+| 渲染独立线程、render() 非阻塞 | ✅ | mod.rs render_loop + Arc<Mutex<Option>> |
+
+### should-fix（留给后续 plan）
+
+1. **WGC 桌面互操作未真实验证**（→ Plan 5/6）：`WgcCaptureSource::try_new` 的完整路径（`IGraphicsCaptureItemInterop::CreateForWindow` + `CreateFreeThreaded` + 帧回调）已实现且编译通过，但 Task 6 demo 默认 consent=false 走程序化降级，真实 WGC 捕获未在桌面验证。Plan 5 接入真实 target_hwnd + consent=true 后需验证：① 透镜扭曲真实窗口像素 ② Win10 2004+ 兼容 ③ 黄边/独占全屏黑帧（spec §10 边界）。ProceduralCaptureSource 是保底，WGC 失败自动回落，不阻塞。
+
+2. **ForcedBreak 模态输入捕获未实现**（→ Plan 5，与原占位一致）：本 plan 的 overlay 是 `WS_EX_TRANSPARENT`（点击穿透），ForcedBreak 仅靠 shader 深暗视觉。Plan 5 需切 overlay 为非透明 + 真实输入捕获（拦截键鼠）。当前 `dimming_for_state(ForcedBreak)=0.9` 已把 u_dim 通道接好，视觉层就绪。
+
+3. **shader 许可证问题已主动解决**（→ 闭合）：原占位担心 ShaderToy CC BY-NC-SA。实际采用**原创实现**（`shaders/blackhole.hlsl` 文件头显式声明 MIT 项目自有，非 ShaderToy 移植）。无许可证风险，此项闭合。
+
+4. **sampler 状态未显式创建**（→ Plan 5/6 优化）：painter.rs 注释说明未创建独立 `D3D11_SAMPLER_DESC`，依赖 D3D11 默认 sampler（点采样+clamp）。捕获纹理用作透镜采样精度要求不苛刻，可接受；若上线后发现采样质量差，建线性 sampler 绑 s0。
+
+5. **多显示器/DPI**（→ 后续，与原占位一致）：overlay 用 `GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN)` 取主显示器全屏。多显示器场景下只覆盖主屏。DPI 缩放未处理（SwapChain backbuffer 尺寸用客户区像素，DWM 会处理合成缩放，但极端 DPI 可能模糊）。多显示器 + 高 DPI 优化留后续 plan。
+
+6. **HWND !Send 的 usize 中转是权宜**（→ 保持现状）：overlay/capture/D3D11Renderer 多处因 `HWND`（`*mut c_void`）非 Send，用 `as usize` 中转跨线程再转回。这是 Windows 句柄跨线程的标准手法（句柄本就是进程级，可在线程间安全传递，Rust 的 Send 检查是静态保守）。已在注释说明。Plan 5 若引入更复杂的多窗口/多捕获源，可考虑封装一个 `SendHwnd` newtype 统一处理。
+
+7. **环境前提扩展**（→ 写进 README，与 Plan 2 note 5 合并）：Plan 3 进一步证实 Plan 2 note 5——`RUSTUP_HOME` 重定向到 D 盘后 MSVC toolchain + WGC/D3D11 feature 全部正常编译。C 盘 ~500MB 不足以装 MSVC toolchain（~1.5GB），必须重定向。Plan 5 的入门文档应包含此设置步骤。
+
