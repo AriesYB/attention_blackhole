@@ -31,4 +31,11 @@ features = [
     "Win32_Graphics_Gdi",           # RegisterClassExW / WNDCLASSEXW / HINSTANCE（窗口类注册历史耦合 GDI）
     "Win32_Graphics_Dwm",           # DWM 命名空间（DwmExtendFrameIntoClientArea 入口）
     "Win32_UI_Controls",            # MARGINS + DwmExtendFrameIntoClientArea 实现（DWM API 实际落在 Controls）
+    # Plan 3 —— WGC 真实窗口捕获（透镜扭曲采样源）
+    "Graphics_Capture",             # GraphicsCaptureItem / GraphicsCaptureSession / Direct3D11CaptureFramePool
+    "Graphics_DirectX_Direct3D11",  # IDirect3DDevice (WinRT) + IDirect3DDxgiInterfaceAccess 桥接
+    "Graphics_DirectX",             # IDirect3DSurface / DirectXPixelFormat 基础
+    "Foundation",                   # TypedEventHandler（WGC 帧到达回调）
+    "Win32_System_WinRT_Direct3D11", # CreateDirect3D11DeviceFromDXGIDevice（device 互操作桥接）
+    "Win32_System_WinRT_Graphics_Capture", # IGraphicsCaptureItemInterop（HWND→item 互操作，若需）
 ]
