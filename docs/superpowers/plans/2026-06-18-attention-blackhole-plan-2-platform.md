@@ -868,7 +868,14 @@ git commit -m "examples: platform_demo verifying real input hooks + window track
 
 ## 终审遗留项（final review 后填写，格式参考 Plan 1）
 
-> 占位：Plan 2 终审后在此记录 GO/NO-GO 与留给后续 plan 的 should-fix。预期候选：
-> 1. hook 回调线程模型的健壮性（消息泵异常、线程 panic）—— 留给 Plan 5 shell 的错误处理统一。
-> 2. 多显示器/DPI 下前台窗口标题的编码（UTF-16 surrogate pair）—— 当前 `from_utf16_lossy` 可能丢字符，等真实环境发现再修。
-> 3. `key_intervals_ms` 在高频输入下的 lock contention —— 实测若有瓶颈再改 lock-free ring buffer。
+终审（实现完成自检，2026-06-18）结论 **GO**，DoD 全部满足：`cargo test` 34 passed、`platform_demo` 在前台终端跑通真实键鼠 hook（keys/mouse/sw/bk/idle/on_target/intervals 全部正确）。以下 should-fix 留给后续 plan：
+
+1. **Windows SDK 版本漂移**（→ Plan 3+）：开发机装的是 Win11 SDK `10.0.22621.0`，但 `windows` crate 链接的 import lib 来自 `windows-link`（与 SDK 无关）。Plan 3 接入 D3D11/WGC 时需确认 `d3d11.lib`/`d3dcompiler.lib` 由哪个 feature 提供，可能要补 `Win32_Graphics_Direct3D11` 等 feature。
+
+2. **`platform_demo` 必须前台运行**（→ 已在 example 文档注明）：低级键盘 hook 的回调由系统派发给「安装线程」，但该进程必须处于可接收输入的状态。在 agent 的后台无 tty shell 中运行时，键盘回调不触发（`key_cb` 全程 0）；在用户自己的前台终端运行则完全正常。Plan 5 的 Tauri 外壳是 GUI 进程，天然满足此前提，无此问题。
+
+3. **`KeyIntervals` / `IdleTracker` 未被生产代码使用**（→ 保持现状）：Plan 2 实现时按方案 A 用 `last_input_ms` 原子 + `intervals_from` 函数直接算，logic.rs 的 `IdleTracker`/`KeyIntervals` 结构沦为「纯逻辑可测基准」（模块级 `allow(dead_code)`）。它们的单测仍验证数学正确性，保留作对照；若 Plan 5 引入配置加载时校验 idle 数学，可复用。
+
+4. **诊断 API 留在库里**（→ Plan 5 决定是否移除）：`Win32SignalProvider::hook_diag` / `cb_fired` / `key_cb` 是排查 hook 不工作时的关键信号，保留为 `pub`。Plan 5 接入托盘/日志后，可考虑把它们接到日志而非裸暴露。
+
+5. **环境前提已固化**（→ 写进 README/CONTRIBUTING，非代码）：本仓库 `rust-toolchain.toml` pin MSVC；需 `Visual Studio Build Tools` 含 `C++ 桌面开发` workload（VC Tools + Windows SDK）；`RUSTUP_HOME`/`CARGO_HOME` 建议重定向到非 C 盘（C 盘空间易不足）。这些在实现 Plan 2 时踩过，应记入项目入门文档。
