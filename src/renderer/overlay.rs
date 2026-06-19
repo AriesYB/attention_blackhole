@@ -24,8 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     self as wm, CreateWindowExW, DefWindowProcW, DispatchMessageW, LoadCursorW, PeekMessageW,
     PostThreadMessageW, RegisterClassExW, TranslateMessage, HCURSOR, IDC_ARROW, MSG,
     PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_NCCREATE, WM_QUIT, WM_TIMER,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_POPUP,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use super::RenderError;
@@ -197,11 +196,12 @@ unsafe fn create_overlay_window(
     // - WS_EX_LAYERED：逐像素 alpha 合成的基础（配合 DWM）。
     // - WS_EX_TRANSPARENT：hit-test 透传 → 鼠标点击穿过到下层（点击穿透）。
     // - WS_EX_TOPMOST：永远置顶。
-    // - WS_EX_NOREDIRECTIONBITMAP：跳过 GDI 重定向位图，D3D11 直接合成（性能 +
-    //   alpha 正确性的现代推荐做法，避免 GDI 不支持 alpha 导致黑底）。
-    let ex_style = WINDOW_EX_STYLE(
-        WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_TOPMOST.0 | WS_EX_NOREDIRECTIONBITMAP.0,
-    );
+    //
+    // 注意：曾用 WS_EX_NOREDIRECTIONBITMAP（跳过 GDI 重定向位图，D3D11 直接合成），
+    // 但它在部分显卡驱动 / 旧 Win10 上 swapchain 内容不被 DWM 合成（实测本机看不到
+    // 任何输出，即使 Present 返回 S_OK）。故改回经典方案：纯 LAYERED + DWM 扩展框架
+    // （margins=-1）+ 普通 swapchain，兼容性最广。backbuffer 的 alpha 经 DWM 逐像素合成。
+    let ex_style = WINDOW_EX_STYLE(WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_TOPMOST.0);
     let style = WINDOW_STYLE(WS_POPUP.0);
 
     let hwnd = CreateWindowExW(
@@ -222,8 +222,8 @@ unsafe fn create_overlay_window(
     diag.store(2, Ordering::SeqCst);
 
     // DWM 逐像素 alpha：margin={-1} 把「扩展框架」覆盖整个客户区，
-    // 使 backbuffer 的 alpha 通道成为合成 alpha。配合 NOREDIRECTIONBITMAP，
-    // D3D11 输出的预乘 alpha 直接上屏。
+    // 使 swapchain backbuffer 的 alpha 通道成为合成 alpha（经典 LAYERED + DWM 方案，
+    // 兼容性最广；放弃 NOREDIRECTIONBITMAP 因其在部分驱动上不合成）。
     let margins = MARGINS {
         cxLeftWidth: -1,
         cxRightWidth: -1,
@@ -231,6 +231,11 @@ unsafe fn create_overlay_window(
         cyBottomHeight: -1,
     };
     DwmExtendFrameIntoClientArea(hwnd, &margins)?;
+
+    // LAYERED 窗口默认完全透明（alpha=0），需设一次全局 alpha=255（完全不透明），
+    // 让 DWM 的逐像素 alpha 接管——否则窗口永远 alpha=0 不可见。
+    // crKey=0(黑) + LWA_ALPHA：按 alpha 值合成，颜色 key 不生效。
+    wm::SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 255, wm::LWA_ALPHA)?;
 
     diag.store(3, Ordering::SeqCst);
 

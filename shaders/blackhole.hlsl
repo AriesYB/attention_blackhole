@@ -127,10 +127,17 @@ float4 ps_main(VSOut i) : SV_Target
 
     float3 col = bg;
 
-    // 1) 落入事件视界：纯黑（连背景光都吞噬）。
+    // alpha：决定该像素对桌面的遮挡程度（NOREDIRECTIONBITMAP + DWM 逐像素 alpha）。
+    // - 视界内/吸积盘/光子环：高 alpha（遮挡注意力）。
+    // - 远离视界的程序化背景：低 alpha（让桌面透出，黑洞「悬浮」感）。
+    // 随 load 上升，整体 alpha 圈外扩 + 加深，强化「吞噬」。
+    float alpha = 0.0;
+
+    // 1) 落入事件视界：纯黑（连背景光都吞噬）+ 全不透明。
     if (r < r_eh)
     {
         col = float3(0.0, 0.0, 0.0);
+        alpha = 1.0;
     }
     else
     {
@@ -152,19 +159,28 @@ float4 ps_main(VSOut i) : SV_Target
             // 盘色：高温内圈白蓝 → 外圈橙红。
             float3 hot = lerp(float3(1.0, 0.9, 0.7), float3(1.0, 0.4, 0.1), t);
             col += hot * brightness * (0.6 + u_load * 0.8);
+            alpha = max(alpha, 0.9); // 盘接近不透明
         }
 
         // 3) 光子环：视界边缘极亮细环（爱因斯坦环简化）。
         float ring = exp(-pow((r - r_eh * 1.02) * 40.0, 2.0));
         col += float3(1.0, 0.85, 0.6) * ring * (0.4 + u_load * 0.6);
+        alpha = max(alpha, ring * 0.95);
 
         // 4) 暗角：视界外一圈渐变压暗，强化「被吸引」感。随 load 加深。
         float vignette = smoothstep(r_eh * 1.2, r_eh * 0.4, r);
         col *= lerp(1.0, 0.3, vignette * u_load);
+
+        // 5) 背景 alpha：以视界为中心向外指数衰减，远处趋近透明（桌面透出）。
+        //    load 越高，遮挡范围越大（注意力黑洞「扩张」）。
+        float halo = exp(-r * (4.0 - u_load * 3.0)) * (0.5 + u_load * 0.5);
+        alpha = max(alpha, halo);
     }
 
     // 全局压暗（u_dim：Dimming/ForcedBreak 状态施加）。
     col *= (1.0 - u_dim * 0.7);
 
-    return float4(col, 1.0);
+    // 预乘 alpha 输出（DWM 在 NOREDIRECTIONBITMAP 模式按 premultiplied alpha 合成）。
+    // 不预乘会导致 DWM 把 rgb 当已乘值 → 颜色偏暗。
+    return float4(col * alpha, alpha);
 }

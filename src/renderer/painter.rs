@@ -10,8 +10,8 @@
 use std::mem::size_of;
 
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Buffer, ID3D11DeviceContext, ID3D11PixelShader, ID3D11ShaderResourceView,
-    ID3D11VertexShader, D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE,
+    ID3D11Buffer, ID3D11DeviceContext, ID3D11PixelShader, ID3D11RenderTargetView,
+    ID3D11ShaderResourceView, ID3D11VertexShader, D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE,
 };
 
 use super::capture::CaptureSource;
@@ -26,6 +26,7 @@ pub struct PaintContext<'a> {
     pub vertex_shader: &'a ID3D11VertexShader,
     pub pixel_shader: &'a ID3D11PixelShader,
     pub cbuffer: &'a ID3D11Buffer,
+    pub rtv: &'a ID3D11RenderTargetView,
     pub capture: &'a mut dyn CaptureSource,
 }
 
@@ -75,10 +76,26 @@ pub fn paint_frame(
         ctx.context.Unmap(ctx.cbuffer, 0);
     }
 
-    // 4. 绑定 VS/PS + cbuffer(b0) + SRV(t0)。
+    // 4. 绑定 VS/PS + cbuffer(b0) + RTV + SRV(t0)。
     unsafe {
         ctx.context.VSSetShader(Some(ctx.vertex_shader), None);
         ctx.context.PSSetShader(Some(ctx.pixel_shader), None);
+    }
+    // **关键**：绑定输出合并阶段的 RenderTargetView。无 RTV 时 PS 输出无处可写，
+    // Present 呈现空白（透明）——这是黑洞不可见的根因。
+    unsafe {
+        let rtvs = [Some(ctx.rtv.clone())];
+        ctx.context.OMSetRenderTargets(Some(&rtvs), None);
+        // 设全屏 viewport（backbuffer 大小）。
+        use windows::Win32::Graphics::Direct3D11::D3D11_VIEWPORT;
+        ctx.context.RSSetViewports(Some(&[D3D11_VIEWPORT {
+            TopLeftX: 0.0,
+            TopLeftY: 0.0,
+            Width: resolution.0,
+            Height: resolution.1,
+            MinDepth: 0.0,
+            MaxDepth: 1.0,
+        }]));
     }
     // cbuffer 绑到 VS 和 PS 的 b0。
     let cbs = [Some(ctx.cbuffer.clone())];

@@ -12,11 +12,11 @@
 //! 真正绘制在独立 60fps 线程，`Renderer::render` 只经 channel 推 Frame（非阻塞），
 //! 渲染卡顿不拖慢 controller 的 10Hz tick。见 spec §8.3。
 
-mod d3d;
-mod overlay; // Task 2
-mod shader; // Task 3
-mod capture; // Task 4
-mod painter; // Task 5
+pub mod d3d;
+pub mod overlay; // Task 2
+pub mod shader; // Task 3
+pub mod capture; // Task 4
+pub mod painter; // Task 5
 
 /// renderer 模块统一错误类型。D3D11/WGC 的 windows::core::Error 统一包成此类型，
 /// 降级路径（无头/旧 OS）据此回落程序化背景。controller 不感知错误细节——
@@ -152,6 +152,7 @@ struct RenderResources {
     d3d: d3d::D3D11Context,
     shaders: shader::Shaders,
     cbuffer: windows::Win32::Graphics::Direct3D11::ID3D11Buffer,
+    rtv: windows::Win32::Graphics::Direct3D11::ID3D11RenderTargetView,
     capture: Box<dyn CaptureSource + Send>,
 }
 
@@ -173,6 +174,17 @@ fn start_render_resources(
     let shaders = shader::Shaders::new(&d3d.device)?;
     let cbuffer = shader::create_frame_constants_buffer(&d3d.device)?;
 
+    // 3b. SwapChain backbuffer → RenderTargetView。PS 输出必须有 RTV 才会写进 backbuffer，
+    //     否则 Present 呈现空白。RTV 一次性创建，每帧复用（OMSetRenderTargets）。
+    let backbuffer: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D =
+        unsafe { d3d.swapchain.GetBuffer(0) }?;
+    let mut rtv: Option<windows::Win32::Graphics::Direct3D11::ID3D11RenderTargetView> = None;
+    unsafe {
+        d3d.device
+            .CreateRenderTargetView(&backbuffer, None, Some(&mut rtv))?;
+    }
+    let rtv = rtv.unwrap();
+
     // 4. 捕获源：consent + 有目标 HWND 才尝试 WGC，否则程序化降级。
     let capture: Box<dyn CaptureSource + Send> = match (target_hwnd, consent) {
         (Some(hwnd), true) => match capture::WgcCaptureSource::try_new(&d3d.device, hwnd) {
@@ -193,6 +205,7 @@ fn start_render_resources(
         d3d,
         shaders,
         cbuffer,
+        rtv,
         capture,
     })
 }
@@ -208,6 +221,7 @@ fn render_loop(
         d3d,
         shaders,
         cbuffer,
+        rtv,
         mut capture,
     } = res;
     let resolution = (_overlay.size.width as f32, _overlay.size.height as f32);
@@ -228,6 +242,7 @@ fn render_loop(
                 vertex_shader: &shaders.vertex,
                 pixel_shader: &shaders.pixel,
                 cbuffer: &cbuffer,
+                rtv: &rtv,
                 capture: capture.as_mut(),
             };
             let now = start.elapsed().as_secs_f32();
