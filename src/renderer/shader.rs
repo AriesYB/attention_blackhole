@@ -17,8 +17,8 @@ use windows::core::{s, PCSTR};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{ID3DBlob, ID3DInclude};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Buffer, ID3D11Device, ID3D11PixelShader, ID3D11VertexShader, D3D11_BIND_CONSTANT_BUFFER,
-    D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_WRITE, D3D11_USAGE_DYNAMIC,
+    ID3D11Buffer, ID3D11Device, ID3D11InputLayout, ID3D11PixelShader, ID3D11VertexShader,
+    D3D11_BIND_CONSTANT_BUFFER, D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_WRITE, D3D11_USAGE_DYNAMIC,
 };
 
 use super::RenderError;
@@ -53,14 +53,18 @@ impl FrameConstants {
     }
 }
 
-/// 编译好的 shader 集合：VS + PS 对象。
+/// 编译好的 shader 集合：VS + PS 对象 + input layout。
 pub struct Shaders {
     pub vertex: ID3D11VertexShader,
     pub pixel: ID3D11PixelShader,
+    /// 全屏三角形 input layout（空元素：VS 只用 SV_VertexID，无顶点缓冲输入）。
+    /// 必须绑定一次 IASetInputLayout，否则 Input Assembler 不向 VS 供应顶点，
+    /// Draw 不产生任何几何体 → backbuffer 全空（这是黑洞不可见的根因）。
+    pub input_layout: ID3D11InputLayout,
 }
 
 impl Shaders {
-    /// 编译 HLSL 源并创建 VS/PS。
+    /// 编译 HLSL 源并创建 VS/PS + input layout。
     pub fn new(device: &ID3D11Device) -> Result<Self, RenderError> {
         let hlsl = include_str!("../../shaders/blackhole.hlsl");
 
@@ -70,6 +74,17 @@ impl Shaders {
         unsafe {
             device
                 .CreateVertexShader(&vs_blob, None, Some(&mut vertex))
+                .map_err(RenderError::Windows)?;
+        }
+
+        // input layout：用 VS blob 创建。VS 输入只有 SV_VertexID（系统语义，不来自
+        // 顶点缓冲），故 layout 元素为空数组。D3D11 要求 IASetInputLayout 被绑定过
+        // （即使是空 layout）才会让 Draw 产生几何体——这是「无顶点缓冲全屏三角形」
+        // 方案的官方要求。
+        let mut input_layout: Option<ID3D11InputLayout> = None;
+        unsafe {
+            device
+                .CreateInputLayout(&[], &vs_blob, Some(&mut input_layout))
                 .map_err(RenderError::Windows)?;
         }
 
@@ -84,6 +99,7 @@ impl Shaders {
 
         Ok(Self {
             vertex: vertex.unwrap(),
+            input_layout: input_layout.unwrap(),
             pixel: pixel.unwrap(),
         })
     }

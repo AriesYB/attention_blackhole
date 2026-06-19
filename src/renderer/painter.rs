@@ -10,7 +10,7 @@
 use std::mem::size_of;
 
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Buffer, ID3D11DeviceContext, ID3D11PixelShader, ID3D11RenderTargetView,
+    ID3D11Buffer, ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader, ID3D11RenderTargetView,
     ID3D11ShaderResourceView, ID3D11VertexShader, D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE,
 };
 
@@ -25,6 +25,8 @@ pub struct PaintContext<'a> {
     pub context: &'a ID3D11DeviceContext,
     pub vertex_shader: &'a ID3D11VertexShader,
     pub pixel_shader: &'a ID3D11PixelShader,
+    /// input layout：Draw 前必须 IASetInputLayout，否则无顶点缓冲全屏三角形不产生几何体。
+    pub input_layout: &'a ID3D11InputLayout,
     pub cbuffer: &'a ID3D11Buffer,
     pub rtv: &'a ID3D11RenderTargetView,
     pub capture: &'a mut dyn CaptureSource,
@@ -80,12 +82,23 @@ pub fn paint_frame(
     unsafe {
         ctx.context.VSSetShader(Some(ctx.vertex_shader), None);
         ctx.context.PSSetShader(Some(ctx.pixel_shader), None);
+        // **关键**：绑定 input layout。VS 只用 SV_VertexID（无顶点缓冲），但 D3D11 要求
+        // IASetInputLayout 被调用过（即使是空 layout）才会在 Draw 时向 VS 供应顶点，
+        // 否则全屏三角形不产生任何几何体 → backbuffer 全空 → 黑洞不可见。
+        ctx.context.IASetInputLayout(Some(ctx.input_layout));
+        // IA 拓扑：三角形列表（3 顶点画一个三角形）。
+        use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        ctx.context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     }
     // **关键**：绑定输出合并阶段的 RenderTargetView。无 RTV 时 PS 输出无处可写，
-    // Present 呈现空白（透明）——这是黑洞不可见的根因。
+    // Present 呈现空白（透明）。
     unsafe {
         let rtvs = [Some(ctx.rtv.clone())];
         ctx.context.OMSetRenderTargets(Some(&rtvs), None);
+        // 每帧先清 backbuffer 为完全透明（alpha=0）。DXGI_SWAP_EFFECT_DISCARD 不保证
+        // backbuffer 内容；shader 用预乘 alpha 输出（视界外 alpha≈0），未清时残留的
+        // 不透明像素会让 DWM 把不该显示的区域合成出来，破坏「桌面透出」效果。
+        ctx.context.ClearRenderTargetView(ctx.rtv, &[0.0, 0.0, 0.0, 0.0]);
         // 设全屏 viewport（backbuffer 大小）。
         use windows::Win32::Graphics::Direct3D11::D3D11_VIEWPORT;
         ctx.context.RSSetViewports(Some(&[D3D11_VIEWPORT {

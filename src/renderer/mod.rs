@@ -241,6 +241,7 @@ fn render_loop(
                 context: &d3d.context,
                 vertex_shader: &shaders.vertex,
                 pixel_shader: &shaders.pixel,
+                input_layout: &shaders.input_layout,
                 cbuffer: &cbuffer,
                 rtv: &rtv,
                 capture: capture.as_mut(),
