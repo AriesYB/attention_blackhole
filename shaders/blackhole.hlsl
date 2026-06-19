@@ -127,10 +127,10 @@ float4 ps_main(VSOut i) : SV_Target
 
     float3 col = bg;
 
-    // alpha：决定该像素对桌面的遮挡程度（NOREDIRECTIONBITMAP + DWM 逐像素 alpha）。
+    // alpha：决定该像素对桌面的遮挡程度（DWM 逐像素 alpha 合成）。
     // - 视界内/吸积盘/光子环：高 alpha（遮挡注意力）。
     // - 远离视界的程序化背景：低 alpha（让桌面透出，黑洞「悬浮」感）。
-    // 随 load 上升，整体 alpha 圈外扩 + 加深，强化「吞噬」。
+    // 随 load 上升，可见圈外扩 + 加深，强化「吞噬」。
     float alpha = 0.0;
 
     // 1) 落入事件视界：纯黑（连背景光都吞噬）+ 全不透明。
@@ -141,41 +141,64 @@ float4 ps_main(VSOut i) : SV_Target
     }
     else
     {
-        // 2) 吸积盘：视界外的发光环带，倾斜（椭圆）投影。
-        //    椭圆：y 方向压扁 0.3，模拟从侧面看圆盘。
+        // 2) 吸积盘（卡冈图雅式）：倾斜椭圆环 + 多普勒偏移 + 螺旋旋臂 + 内热外冷。
+        //    椭圆：y 方向压扁（模拟从侧面斜视圆盘）。
         float2 disk = centered;
         disk.y *= 3.3; // 反压扁到圆
         float rd = length(disk);
-        // 盘范围：视界外 ~3.2 倍视界半径（加宽，盘更醒目）。
+        float angle = atan2(disk.y, disk.x);
+        // 盘范围：视界外 ~3.2 倍视界半径。
         float disk_inner = r_eh * 1.02;
         float disk_outer = r_eh * 3.2;
+        // 内锐外柔：内边缘 sharp，外边缘渐隐（smoothstep）。
+        float disk_mask = smoothstep(disk_outer, disk_inner * 1.05, rd);
         if (rd > disk_inner && rd < disk_outer && centered.y > -r_eh * 0.15)
         {
-            // 距视界越近越亮（引力红移反之简化）+ 旋转条纹。
+            // 归一化径向坐标 0(内)..1(外)。
             float t = (rd - disk_inner) / (disk_outer - disk_inner);
-            float angle = atan2(disk.y, disk.x);
-            float spin = sin(angle * 8.0 + u_time * 1.5) * 0.5 + 0.5;
-            // 亮度基线抬高（1.0 + 0.5*spin），任何桌面背景下一眼可见。
-            float brightness = (1.0 - t) * (1.0 + 0.5 * spin);
-            // 盘色：高温内圈白蓝（更亮） → 外圈橙红。
-            float3 hot = lerp(float3(1.0, 0.95, 0.8), float3(1.0, 0.45, 0.1), t);
-            col += hot * brightness * (0.6 + u_load * 0.8);
-            alpha = max(alpha, 0.95); // 盘接近不透明（提亮后更扎实）
+
+            // 螺旋旋臂：极角与半径耦合形成旋臂（盘面物质绕黑洞旋转的密度波）。
+            // 多频率叠加：粗旋臂 + 细条纹，加时间项让盘「旋转」。
+            float spin_phase = angle - t * 6.0 + u_time * 0.9;
+            float arms = 0.5 + 0.5 * sin(spin_phase * 3.0);          // 粗旋臂（3 臂）
+            arms *= 0.6 + 0.4 * (0.5 + 0.5 * sin(spin_phase * 8.0));  // 细条纹调制
+            // 内圈物质更密（引力强），旋臂向内增强。
+            arms *= lerp(1.4, 0.5, t);
+
+            // 多普勒偏移（相对论性 beaming）：盘朝观察者运动的一侧（这里取 angle≈+π/2
+            // 一侧）显著增亮，远离一侧压暗。这是卡冈图雅「半亮半暗」的标志特征。
+            // doppler: sin(angle) 从 +1 到 -1，左右半盘明暗反转。
+            float doppler = 0.5 + 0.5 * sin(angle);
+            float beaming = lerp(0.35, 2.2, doppler); // 暗侧 0.35 / 亮侧 2.2
+
+            // 亮度：内圈强 + 旋臂调制 + 多普勒 beaming + load 驱动整体强度。
+            float brightness = (1.0 - t * 0.7) * arms * beaming * (0.5 + u_load * 1.1);
+
+            // 盘色：内热外冷——蓝白(高温内) → 黄 → 橙 → 暗红(低温外)。
+            float3 c_inner = float3(0.85, 0.93, 1.0);  // 蓝白
+            float3 c_mid   = float3(1.0, 0.85, 0.5);   // 黄
+            float3 c_outer = float3(1.0, 0.35, 0.08);  // 橙红
+            float3 hot = t < 0.5
+                ? lerp(c_inner, c_mid, t * 2.0)
+                : lerp(c_mid, c_outer, (t - 0.5) * 2.0);
+            // 多普勒亮侧偏蓝（蓝移），暗侧偏红（红移）。
+            hot = lerp(hot * float3(1.0, 0.85, 0.7), hot * float3(0.8, 0.9, 1.15), doppler);
+
+            col += hot * brightness;
+            // alpha：盘接近不透明，外缘随 mask 渐隐（融入背景/桌面）。
+            alpha = max(alpha, 0.85 * disk_mask + 0.1);
         }
 
-        // 3) 光子环：视界边缘极亮环（爱因斯坦环简化）。衰减变缓（40→22）使亮环更宽更醒目。
-        float ring = exp(-pow((r - r_eh * 1.02) * 22.0, 2.0));
-        col += float3(1.0, 0.85, 0.6) * ring * (1.0 + u_load * 0.5);
+        // 3) 光子环（爱因斯坦环）：视界边缘的极亮细环——光线绕视界多圈聚焦。
+        //    细（衰减陡 *30）以贴近真实爱因斯坦环；盘亮侧的环也更亮（呼应多普勒）。
+        float doppler_ring = 0.6 + 0.4 * sin(atan2(centered.y, centered.x));
+        float ring = exp(-pow((r - r_eh * 1.02) * 30.0, 2.0));
+        col += float3(1.0, 0.92, 0.75) * ring * (0.8 + u_load * 0.6) * doppler_ring;
         alpha = max(alpha, ring * 0.95);
 
-        // 4) 暗角：视界外一圈渐变压暗，强化「被吸引」感。随 load 加深。
-        float vignette = smoothstep(r_eh * 1.2, r_eh * 0.4, r);
-        col *= lerp(1.0, 0.3, vignette * u_load);
-
-        // 5) 局部光晕：仅视界外一小圈有 alpha，远处快速衰减到 0，桌面完全透出。
-        //    （原为全屏 halo 暗色蒙版，会遮住桌面——改为紧贴黑洞的局部光晕，
-        //    既勾勒出黑洞轮廓/压迫感，又不霸屏。随 load 加深。）
-        float local_glow = exp(-(r - r_eh) * 8.0) * (0.4 + u_load * 0.4);
+        // 4) 局部光晕：仅视界外一小圈有 alpha，远处快速衰减到 0，桌面完全透出。
+        //    勾勒黑洞轮廓、强化压迫感，但不霸屏。随 load 加深。
+        float local_glow = exp(-(r - r_eh) * 7.0) * (0.35 + u_load * 0.45);
         alpha = max(alpha, local_glow);
     }
 
