@@ -37,7 +37,8 @@ use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11ShaderResourceView, ID3D11Texture2D,
+    ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::HMONITOR;
@@ -120,12 +121,13 @@ pub struct WgcCaptureSource {
     frame_pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     device: ID3D11Device,
+    context: ID3D11DeviceContext,
     /// 最新捕获帧纹理（捕获回调写，painter 读）。WGC FramePool 拥有、我们持 COM 引用。
     latest: Arc<Mutex<Option<ID3D11Texture2D>>>,
-    /// 由 latest 纹理建的 SRV（纹理对象变化时重建）。
-    cached_srv: Option<ID3D11ShaderResourceView>,
-    /// cached_srv 当前指向的 latest 纹理对象地址（用于判别是否需重建 SRV）。
-    cached_srv_src_ptr: Option<usize>,
+    /// 自有可采样纹理。每帧把 WGC 帧复制进来，shader 永远只采它。
+    copy_tex: Option<ID3D11Texture2D>,
+    copy_srv: Option<ID3D11ShaderResourceView>,
+    copy_size: Option<(u32, u32)>,
     active: bool,
 }
 
@@ -193,65 +195,103 @@ impl WgcCaptureSource {
             .CreateCaptureSession(&item)
             .map_err(RenderError::Windows)?;
 
+        let context = unsafe { device.GetImmediateContext().map_err(RenderError::Windows)? };
+
         Ok(Self {
             item,
             frame_pool,
             session,
             device: device.clone(),
+            context,
             latest,
-            cached_srv: None,
-            cached_srv_src_ptr: None,
+            copy_tex: None,
+            copy_srv: None,
+            copy_size: None,
             active: false,
         })
     }
 
-    /// 每帧调用：保证 SRV 指向最新的捕获纹理。
+    /// 每帧调用：把最新 WGC 帧复制到自有纹理，并返回自有纹理的 SRV。
     ///
-    /// 直接采样 WGC 的纹理：WGC 的 CreateFreeThreaded FramePool 用 2 个缓冲区轮换，
-    /// 我们持 latest 纹理的 COM 引用（回调里 GetInterface 出来的 ID3D11Texture2D），
-    /// 故 WGC 不会在我们用时释放它——它会用另一个缓冲区。SRV 直接建在 latest 纹理上。
-    ///
-    /// 关键：不用 CopyResource（之前试过，会在第 2 帧死锁——immediate context 上 CopyResource
-    /// 一个 WGC 拥有的 2MP 纹理 + 同时 Draw 采样它，与 WGC 回调线程争用导致卡死）。
-    /// 直接采样 WGC 纹理虽理论上有「内容更新中」风险，但 WGC 的帧切换是原子的
-    ///（整帧替换 latest 指针），采样到的要么是旧帧要么是新帧，不会撕裂。
-    fn rebuild_srv(&mut self) {
-        let guard = self.latest.lock().unwrap();
-        let Some(src) = guard.as_ref() else {
-            self.cached_srv = None;
+    /// 关键：不要把 WGC 的 frame-pool texture 长期绑定成 shader SRV。FramePool 默认
+    /// 只有 2 个缓冲；如果 latest + cached SRV 都持有 WGC 纹理，拖动窗口这种高频
+    /// compositor 更新会很快把 frame pool 堵住，表现为“按住鼠标拖动期间卡旧画面，
+    /// 松手后才更新”。复制到自有纹理后立刻释放 WGC 帧引用，frame pool 才能持续产帧。
+    fn update_copy_from_latest(&mut self) {
+        let src = {
+            let mut guard = self.latest.lock().unwrap();
+            guard.take()
+        };
+        let Some(src) = src else {
             return;
         };
-        // 纹理对象变了（WGC 轮到另一个缓冲区）→ 重建 SRV；否则复用。
-        // 用 COM 指针地址做标识（同一缓冲区对象地址不变）。
-        let cur_ptr = std::ptr::addr_of!(*src) as usize;
-        let need_rebuild = match self.cached_srv_src_ptr {
-            Some(p) => p != cur_ptr,
-            None => true,
-        };
-        if !need_rebuild {
-            return;
+
+        let mut src_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            src.GetDesc(&mut src_desc);
         }
-        let mut srv: Option<ID3D11ShaderResourceView> = None;
-        let desc = windows::Win32::Graphics::Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC {
-            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
-            ViewDimension: windows::Win32::Graphics::Direct3D::D3D_SRV_DIMENSION_TEXTURE2D,
-            Anonymous: windows::Win32::Graphics::Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
-                Texture2D: windows::Win32::Graphics::Direct3D11::D3D11_TEX2D_SRV {
-                    MostDetailedMip: 0,
-                    MipLevels: u32::MAX,
+        let size = (src_desc.Width, src_desc.Height);
+
+        if self.copy_tex.is_none() || self.copy_size != Some(size) {
+            let copy_desc = D3D11_TEXTURE2D_DESC {
+                Width: src_desc.Width,
+                Height: src_desc.Height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: src_desc.Format,
+                SampleDesc: src_desc.SampleDesc,
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+
+            let mut tex: Option<ID3D11Texture2D> = None;
+            let tex_result = unsafe {
+                self.device
+                    .CreateTexture2D(&copy_desc, None, Some(&mut tex))
+            };
+            if tex_result.is_err() {
+                self.copy_tex = None;
+                self.copy_srv = None;
+                self.copy_size = None;
+                return;
+            }
+
+            let tex = tex.unwrap();
+            let mut srv: Option<ID3D11ShaderResourceView> = None;
+            let desc = windows::Win32::Graphics::Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC {
+                Format: copy_desc.Format,
+                ViewDimension: windows::Win32::Graphics::Direct3D::D3D_SRV_DIMENSION_TEXTURE2D,
+                Anonymous: windows::Win32::Graphics::Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Texture2D: windows::Win32::Graphics::Direct3D11::D3D11_TEX2D_SRV {
+                        MostDetailedMip: 0,
+                        MipLevels: 1,
+                    },
                 },
-            },
-        };
-        let r = unsafe {
-            self.device
-                .CreateShaderResourceView(src, Some(&desc), Some(&mut srv))
-        };
-        if r.is_ok() {
-            self.cached_srv = srv;
-            self.cached_srv_src_ptr = Some(cur_ptr);
-        } else {
-            self.cached_srv = None;
-            self.cached_srv_src_ptr = None;
+            };
+            let srv_result = unsafe {
+                self.device
+                    .CreateShaderResourceView(&tex, Some(&desc), Some(&mut srv))
+            };
+            if srv_result.is_err() {
+                self.copy_tex = None;
+                self.copy_srv = None;
+                self.copy_size = None;
+                return;
+            }
+
+            self.copy_tex = Some(tex);
+            self.copy_srv = srv;
+            self.copy_size = Some(size);
+        }
+
+        if let Some(dst) = self.copy_tex.as_ref() {
+            unsafe {
+                self.context.CopyResource(dst, &src);
+            }
+            // `src` drops here, releasing the WGC frame-pool buffer promptly.
+            return;
         }
     }
 }
@@ -261,8 +301,8 @@ impl CaptureSource for WgcCaptureSource {
         if !self.active {
             return None;
         }
-        self.rebuild_srv();
-        self.cached_srv.clone()
+        self.update_copy_from_latest();
+        self.copy_srv.clone()
     }
 
     fn set_active(&mut self, active: bool) {
@@ -279,13 +319,14 @@ impl CaptureSource for WgcCaptureSource {
             // 停止 + 清纹理/SRV（隐私：立即释放捕获纹理，不残留）。
             let _ = self.session.Close();
             *self.latest.lock().unwrap() = None;
-            self.cached_srv = None;
-            self.cached_srv_src_ptr = None;
+            self.copy_tex = None;
+            self.copy_srv = None;
+            self.copy_size = None;
         }
     }
 
     fn has_capture(&self) -> bool {
-        self.active && self.latest.lock().unwrap().is_some()
+        self.active && (self.copy_srv.is_some() || self.latest.lock().unwrap().is_some())
     }
 }
 
@@ -293,8 +334,9 @@ impl Drop for WgcCaptureSource {
     fn drop(&mut self) {
         let _ = self.session.Close();
         *self.latest.lock().unwrap() = None;
-        self.cached_srv = None;
-        self.cached_srv_src_ptr = None;
+        self.copy_tex = None;
+        self.copy_srv = None;
+        self.copy_size = None;
     }
 }
 

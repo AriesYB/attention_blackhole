@@ -111,10 +111,11 @@ impl Shaders {
 fn compile(hlsl: &str, entry: PCSTR, target: PCSTR) -> Result<Vec<u8>, RenderError> {
     let src = hlsl.as_bytes();
     let mut blob: Option<ID3DBlob> = None;
+    let mut err_blob: Option<ID3DBlob> = None;
     // shader 无 #include，pinclude 传 None::<&ID3DInclude>（NULL include 接口）。
     let no_include: Option<&ID3DInclude> = None;
     unsafe {
-        D3DCompile(
+        let compiled = D3DCompile(
             src.as_ptr() as *const _,
             src.len(),
             s!("blackhole.hlsl"),
@@ -127,9 +128,20 @@ fn compile(hlsl: &str, entry: PCSTR, target: PCSTR) -> Result<Vec<u8>, RenderErr
             D3DCOMPILE_OPTIMIZATION_LEVEL3,
             0, // flags2
             &mut blob,
-            None, // error blob（简化：不取，靠 HRESULT）
-        )
-        .map_err(RenderError::Windows)?;
+            Some(&mut err_blob),
+        );
+        if let Err(e) = compiled {
+            if let Some(err_blob) = err_blob {
+                let ptr = err_blob.GetBufferPointer() as *const u8;
+                let len = err_blob.GetBufferSize();
+                let bytes = std::slice::from_raw_parts(ptr, len);
+                eprintln!(
+                    "D3DCompile blackhole.hlsl failed: {}",
+                    String::from_utf8_lossy(bytes)
+                );
+            }
+            return Err(RenderError::Windows(e));
+        }
     }
     let blob = blob.ok_or_else(|| {
         RenderError::Windows(windows::core::Error::from(windows::core::HRESULT(-1)))

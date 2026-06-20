@@ -84,6 +84,9 @@ SamplerState u_sampler         : register(s0);
                             // 2.2 让螺旋纹丝肉眼明显（避免「盘是一整块色」的观感），旋转随之可见。
 #define EXPOSURE     1.00   // 盘光的 tonemap 曝光（捕获纹理不受影响）
 #define LENS_DEPTH   13.00  // 从洞到 capture「天」平面的距离（r_s）。ghostty 默认 13，越大内容弯得越狠。
+#define LENS_STRENGTH 0.68  // overlay 适配：整体透镜位移强度。低一些会降低“放大镜倍率”。
+#define LENS_FLAT_START 0.35 // overlay 适配：从可见半径的 35% 开始逐步压平边缘位移。
+#define CAPTURE_SHARPEN 0.12 // 捕获纹理 bicubic 后轻微锐化，补偿透镜放大时的线性采样糊感。
 #define DILATION_MIN 0.20   // 引力时间膨胀：洞满负荷时盘图案速率衰减到 0.2（ghostty 默认）。
 #define STAR_GAIN    0.00   // 透镜星场亮度（0 = 关，Defaults 关）
 
@@ -132,6 +135,21 @@ float vnoiseWrapY(float2 p, float perY)
 
 // 镜像重复：让透镜后的纹理采样不出界又不边缘涂抹（对应 GLSL 版 mirrorUV）。
 float2 mirrorUV(float2 u) { return 1.0 - abs(1.0 - glmod(u, 2.0)); }
+
+// 本 shader 的几何/物理坐标沿用最初端口：i.uv.y=0 在屏幕底部。
+// D3D/WGC 纹理采样坐标则是 v=0 在纹理顶部。只在采样真实捕获纹理时翻转 V，
+// 避免把黑洞相机、吸积盘倾角和漂移路径一起翻转。
+float2 captureUV(float2 u) { return float2(u.x, 1.0 - u.y); }
+
+float catmull(float x)
+{
+    x = abs(x);
+    float x2 = x * x;
+    float x3 = x2 * x;
+    return x < 1.0
+        ? 1.5 * x3 - 2.5 * x2 + 1.0
+        : (x < 2.0 ? -0.5 * x3 + 2.5 * x2 - 4.0 * x + 2.0 : 0.0);
+}
 
 float2 rot(float2 v, float a)
 {
@@ -199,6 +217,66 @@ float3 procedural_background(float2 uv, float time)
     return col;
 }
 
+float3 sample_capture_bicubic(float2 u)
+{
+    uint texW;
+    uint texH;
+    u_capturedTexture.GetDimensions(texW, texH);
+    float2 texSize = max(float2((float)texW, (float)texH), float2(1.0, 1.0));
+    float2 uv = saturate(captureUV(u));
+    float2 pos = uv * texSize - 0.5;
+    float2 base = floor(pos);
+    float2 f = pos - base;
+
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    [unroll]
+    for (int y = -1; y <= 2; y++)
+    {
+        float wy = catmull(float(y) - f.y);
+        [unroll]
+        for (int x = -1; x <= 2; x++)
+        {
+            float wx = catmull(float(x) - f.x);
+            float w = wx * wy;
+            float2 tc = (base + float2(x, y) + 0.5) / texSize;
+            sum += u_capturedTexture.SampleLevel(u_sampler, saturate(tc), 0.0).rgb * w;
+            wsum += w;
+        }
+    }
+    float3 bicubic = sum / max(wsum, 1e-5);
+
+    // 很轻的 unsharp mask：只补偿双线性/透镜放大带来的软化，避免文字边缘发虚。
+    float2 px = 1.0 / texSize;
+    float3 linear_sample = u_capturedTexture.SampleLevel(u_sampler, uv, 0.0).rgb;
+    float3 blur = (
+        u_capturedTexture.SampleLevel(u_sampler, saturate(uv + float2(px.x, 0.0)), 0.0).rgb +
+        u_capturedTexture.SampleLevel(u_sampler, saturate(uv - float2(px.x, 0.0)), 0.0).rgb +
+        u_capturedTexture.SampleLevel(u_sampler, saturate(uv + float2(0.0, px.y)), 0.0).rgb +
+        u_capturedTexture.SampleLevel(u_sampler, saturate(uv - float2(0.0, px.y)), 0.0).rgb
+    ) * 0.25;
+    return saturate(bicubic + (linear_sample - blur) * CAPTURE_SHARPEN);
+}
+
+float3 sample_scene(float2 u, float time)
+{
+    if (u_has_capture == 1)
+    {
+        return sample_capture_bicubic(u);
+    }
+    return procedural_background(mirrorUV(u), time);
+}
+
+float sample_scene_channel(float2 u, float time, int ci)
+{
+    if (u_has_capture == 1)
+    {
+        float3 c = sample_capture_bicubic(u);
+        return ci == 0 ? c.r : (ci == 1 ? c.g : c.b);
+    }
+    return procedural_background(mirrorUV(u), time)[ci];
+}
+
 // -----------------------------------------------------------------------------
 // pixel shader 主入口：忠实移植 ghostty blackhole.glsl 的 mainImage，
 // 唯一差异是本项目 overlay 需要的 alpha 通道（ghostty 输出恒 alpha=1）。
@@ -207,7 +285,6 @@ float4 ps_main(VSOut i) : SV_Target
 {
     float2 res    = u_resolution;
     float2 uv     = i.uv;
-    uv.y = 1.0 - uv.y;
     float aspect  = res.x / max(res.y, 1.0);
 
     // u_load → 主填充 g（0..1）→ 强度 I 与影子半径 rh。
@@ -257,6 +334,16 @@ float4 ps_main(VSOut i) : SV_Target
     float2 p    = (uv - center) * float2(aspect, 1.0);
     float plen  = length(p);
 
+    // overlay 边界控制：alpha 可以裁出可见范围，但**位移必须先归零**。
+    // 如果只把颜色/alpha 淡掉，边缘仍在采样被透镜偏移后的屏幕位置，而 overlay 外面
+    // 是未偏移的真实桌面，于是会像放大镜边缘一样断开。这里让 warpMask 在 alpha 淡出
+    // 之前归零：边缘处采样坐标回到当前像素，和透明后的桌面连续。
+    // radialFlatten 从中段就开始降低位移，并平方压低边缘梯度，让越靠边越平。
+    float lensReach = lerp(0.3, 0.5, I);
+    float radialFlatten = 1.0 - smoothstep(lensReach * LENS_FLAT_START, lensReach, plen);
+    float warpMask = radialFlatten * radialFlatten * vis;
+    float lensVis = (1.0 - smoothstep(lensReach, lensReach * 1.15, plen)) * vis;
+
     // 屏幕↔世界映射：影子角大小 = B_CRIT r_s，占 rh 屏幕单位 → 1 屏幕单位 = W r_s。
     float W  = B_CRIT / max(rh, 1e-4);
     float2 pr = rot(float2(p.x, -p.y), DISK_ROLL) * W;
@@ -265,6 +352,7 @@ float4 ps_main(VSOut i) : SV_Target
     // 距离窗口（忠实 ghostty）：透镜偏折幅度随 7rh 衰减——只衰减**位移幅度**，
     // 不衰减颜色/alpha。这是 ghostty 让远处文字稳定、近处弯曲的关键。
     float window = exp(-pow(plen / (7 * rh), 2.0));
+    float warp = window * warpMask * LENS_STRENGTH;
 
     float bmax = rout + 3.0;            // 超过此 b 的射线碰不到盘（弱场区起点）
     float Z0   = max(14.0, rout + 5.0); // 相机距离
@@ -282,29 +370,27 @@ float4 ps_main(VSOut i) : SV_Target
         // 有限相机拟合偏折（与测地线在边界偏差<1%，消除圆形接缝）。
         float defl = (2.0 / (W * W)) / max(plen, 1e-4)
                    * (1.29 * u + 0.07) * max(LENS_DEPTH - 2.14 * u + 0.75, 0.0)
-                   * window * vis;
+                   * warp;
         float2 dir = p / max(plen, 1e-5);
         // 微弱色差：蓝比红弯得多一点，远离交接圆淡出。
         float ab = 0.035 * smoothstep(1.0, 2.0, b / bmax);
         float3 term = float3(0.0, 0.0, 0.0);
-        for (int ci = 0; ci < 3; ci++)
+        if (u_has_capture == 1)
         {
-            float k   = 1.0 + (float(ci) - 1.0) * ab;
-            float2 sp  = p - dir * defl * k;
-
-            // 真实捕获用 saturate（钳到边缘像素）而非 mirrorUV——mirrorUV 会让超出屏幕
-            // 的扭曲采样点镜像翻转，产生一大圈「倒像环」（用户不要）。saturate 则采边缘色，
-            // 不翻转。程序化背景仍用 mirrorUV（网格重复无倒像问题）。
-            float2 suv = u_has_capture == 1
-                ? saturate(center + sp / float2(aspect, 1.0))
-                : mirrorUV(center + sp / float2(aspect, 1.0));
-
-            term[ci] = u_has_capture == 1
-                ? u_capturedTexture.Sample(u_sampler, suv)[ci]
-                : procedural_background(suv, t)[ci];
+            float2 sp = p - dir * defl;
+            term = sample_scene(center + sp / float2(aspect, 1.0), t);
+        }
+        else
+        {
+            for (int ci = 0; ci < 3; ci++)
+            {
+                float k   = 1.0 + (float(ci) - 1.0) * ab;
+                float2 sp  = p - dir * defl * k;
+                term[ci] = sample_scene_channel(center + sp / float2(aspect, 1.0), t, ci);
+            }
         }
         float3 d = normalize(float3(-(pr / b) * (2.0 / b), -1.0));
-        bg = term + stars(d) * STAR_GAIN * window * vis;
+        bg = term + stars(d) * STAR_GAIN * warp;
     }
     else
     {
@@ -388,7 +474,7 @@ float4 ps_main(VSOut i) : SV_Target
         if (!captured)
         {
             float3 d = normalize(v);
-            bg += stars(d) * STAR_GAIN * window * vis;
+            bg += stars(d) * STAR_GAIN * warp;
             if (d.z < -0.05)
             {
                 // 出射射线投影到 z=-LENS_DEPTH 天平面，映回屏幕。位移被 window 衰减。
@@ -396,14 +482,10 @@ float4 ps_main(VSOut i) : SV_Target
                 float3 hp = x + d * tpl;
                 float2 q  = rot(hp.xy, -DISK_ROLL) / W;
                 float2 sp = float2(q.x, -q.y);
-                float2 suv = u_has_capture == 1
-                    ? saturate(center + (p + (sp - p) * window * vis) / float2(aspect, 1.0))
-                    : mirrorUV(center + (p + (sp - p) * window * vis) / float2(aspect, 1.0));
+                float2 suv = center + (p + (sp - p) * warp) / float2(aspect, 1.0);
 
                 float toward = smoothstep(0.05, 0.35, -d.z);
-                bg += (u_has_capture == 1
-                    ? u_capturedTexture.Sample(u_sampler, suv).rgb
-                    : procedural_background(suv, t)) * toward;
+                bg += sample_scene(suv, t) * toward;
             }
         }
     }
@@ -416,14 +498,7 @@ float4 ps_main(VSOut i) : SV_Target
 
     // ---- alpha（本项目 overlay 唯一非 ghostty 的部分）----
     // ghostty 输出恒 alpha=1（画在终端文字上）。overlay 需要远场透明、近场不透明。
-    // 关键：透镜可见范围**用绝对半径**随 I 增长，而非相对 rh——因为黑洞本身（rh）保持小，
-    // 但透镜扭曲场要随负荷扩到接近全屏（用户要「最大时透镜占满屏，而非黑洞占满」）。
-    // lensReach：I=0.1 时 ~0.25（小透镜环），I=1 时 ~0.65（占大半屏）。
-    float lensReach = lerp(0.3, 0.5, I);
-    // **硬截止包络**：plen < lensReach 时 alpha=1（完全替换桌面，透镜清晰），lensReach→lensReach*1.15
-    // 窄带内平滑淡出到 0。旧 exp(-(plen/r)²) 的长尾让透镜区外的二次镜像（爱因斯坦环颠倒像）
-    // 半透明渗出一大圈，视觉上「很宽很影响」。硬截止把镜像严格限制在透镜区内。
-    float lensVis = smoothstep(lensReach * 1.15, lensReach, plen) * vis;
+    // lensVis 只负责 overlay 可见范围；warpMask 已在上面负责让位移先归零。
     float a;
     if (captured)
     {
@@ -437,8 +512,8 @@ float4 ps_main(VSOut i) : SV_Target
         a = lensVis;
         // 盘光强/盘遮挡的位置 alpha 抬到 1（盘光区盖住背景）。
         float disklight = dot(emitc, float3(0.299, 0.587, 0.114));
-        a = max(a, vis * smoothstep(0.05, 0.6, disklight));
-        a = max(a, vis * (1.0 - trans));
+        a = max(a, lensVis * smoothstep(0.05, 0.6, disklight));
+        a = max(a, lensVis * (1.0 - trans));
         a = clamp(a, 0.0, 1.0);
     }
 
