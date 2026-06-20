@@ -207,6 +207,7 @@ float4 ps_main(VSOut i) : SV_Target
 {
     float2 res    = u_resolution;
     float2 uv     = i.uv;
+    uv.y = 1.0 - uv.y;
     float aspect  = res.x / max(res.y, 1.0);
 
     // u_load → 主填充 g（0..1）→ 强度 I 与影子半径 rh。
@@ -418,7 +419,7 @@ float4 ps_main(VSOut i) : SV_Target
     // 关键：透镜可见范围**用绝对半径**随 I 增长，而非相对 rh——因为黑洞本身（rh）保持小，
     // 但透镜扭曲场要随负荷扩到接近全屏（用户要「最大时透镜占满屏，而非黑洞占满」）。
     // lensReach：I=0.1 时 ~0.25（小透镜环），I=1 时 ~0.65（占大半屏）。
-    float lensReach = lerp(0.01, 0.6, I);
+    float lensReach = lerp(0.3, 0.5, I);
     // **硬截止包络**：plen < lensReach 时 alpha=1（完全替换桌面，透镜清晰），lensReach→lensReach*1.15
     // 窄带内平滑淡出到 0。旧 exp(-(plen/r)²) 的长尾让透镜区外的二次镜像（爱因斯坦环颠倒像）
     // 半透明渗出一大圈，视觉上「很宽很影响」。硬截止把镜像严格限制在透镜区内。
