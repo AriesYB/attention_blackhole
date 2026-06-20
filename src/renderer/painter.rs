@@ -10,8 +10,9 @@
 use std::mem::size_of;
 
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Buffer, ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader, ID3D11RenderTargetView,
-    ID3D11ShaderResourceView, ID3D11VertexShader, D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE,
+    ID3D11Buffer, ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader, ID3D11SamplerState,
+    ID3D11RenderTargetView, ID3D11ShaderResourceView, ID3D11VertexShader, D3D11_MAP_WRITE_DISCARD,
+    D3D11_MAPPED_SUBRESOURCE,
 };
 
 use super::capture::CaptureSource;
@@ -29,6 +30,8 @@ pub struct PaintContext<'a> {
     pub input_layout: &'a ID3D11InputLayout,
     pub cbuffer: &'a ID3D11Buffer,
     pub rtv: &'a ID3D11RenderTargetView,
+    /// 线性采样器（s0）：让透镜扭曲后的捕获纹理采样平滑（plan-3 should-fix #4）。
+    pub sampler: &'a ID3D11SamplerState,
     pub capture: &'a mut dyn CaptureSource,
 }
 
@@ -121,9 +124,12 @@ pub fn paint_frame(
     unsafe {
         ctx.context.PSSetShaderResources(0, Some(&srvs));
     }
-    // 采样器 s0：本实现未创建独立 sampler 状态对象。shader 声明 SamplerState；
-    // D3D11 默认 sampler 为点采样 + clamp。生产化应建 D3D11_SAMPLER_DESC 绑定，
-    // 此处从简（捕获纹理用作透镜采样，精度要求不苛刻）。
+    // 采样器 s0：线性 + 镜像重复（shader.rs::create_linear_sampler）。让透镜扭曲后的
+    // 捕获纹理边缘平滑、不出界涂抹；程序化背景同样受益。
+    let samplers = [Some(ctx.sampler.clone())];
+    unsafe {
+        ctx.context.PSSetSamplers(0, Some(&samplers));
+    }
 
     // 5. 画全屏三角形（3 顶点，SV_VertexID 驱动，无 vertex buffer / input layout）。
     unsafe {

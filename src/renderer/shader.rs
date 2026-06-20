@@ -14,11 +14,13 @@
 use std::mem::size_of;
 
 use windows::core::{s, PCSTR};
-use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+use windows::Win32::Graphics::Direct3D::Fxc::{D3DCompile, D3DCOMPILE_OPTIMIZATION_LEVEL3};
 use windows::Win32::Graphics::Direct3D::{ID3DBlob, ID3DInclude};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Buffer, ID3D11Device, ID3D11InputLayout, ID3D11PixelShader, ID3D11VertexShader,
-    D3D11_BIND_CONSTANT_BUFFER, D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_WRITE, D3D11_USAGE_DYNAMIC,
+    ID3D11Buffer, ID3D11Device, ID3D11InputLayout, ID3D11PixelShader, ID3D11SamplerState,
+    ID3D11VertexShader, D3D11_BIND_CONSTANT_BUFFER, D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_WRITE,
+    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_SAMPLER_DESC, D3D11_TEXTURE_ADDRESS_MIRROR,
+    D3D11_USAGE_DYNAMIC,
 };
 
 use super::RenderError;
@@ -120,7 +122,9 @@ fn compile(hlsl: &str, entry: PCSTR, target: PCSTR) -> Result<Vec<u8>, RenderErr
             no_include,
             entry,
             target,
-            0, // flags1
+            // flags1：最高优化级。默认 flags=0 等于 LEVEL1（调试友好、优化少），32 步测地线
+            // + 捕获纹理采样的全屏 PS 在 LEVEL1 下明显卡顿。LEVEL3 显著提速（用户反馈「卡」）。
+            D3DCOMPILE_OPTIMIZATION_LEVEL3,
             0, // flags2
             &mut blob,
             None, // error blob（简化：不取，靠 HRESULT）
@@ -153,6 +157,34 @@ pub fn create_frame_constants_buffer(device: &ID3D11Device) -> Result<ID3D11Buff
             .map_err(RenderError::Windows)?;
     }
     Ok(buffer.unwrap())
+}
+
+/// 创建 capture 纹理的线性采样器（绑 s0）。
+///
+/// plan-3 终审的 should-fix #4：painter 原依赖 D3D11 默认 sampler（点采样+clamp），
+/// 透镜扭曲后的捕获纹理显块状。这里建一个线性三线性 sampler + 镜像重复寻址
+///（`ADDRESS_MIRROR`，对应 shader 的 `mirrorUV` 语义，让透镜后的越界采样不出界、
+/// 不边缘涂抹）。几何盘内的捕获纹理作 lensed sky plane，线性采样让扭曲的代码边缘平滑。
+pub fn create_linear_sampler(device: &ID3D11Device) -> Result<ID3D11SamplerState, RenderError> {
+    let desc = D3D11_SAMPLER_DESC {
+        Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+        AddressU: D3D11_TEXTURE_ADDRESS_MIRROR,
+        AddressV: D3D11_TEXTURE_ADDRESS_MIRROR,
+        AddressW: D3D11_TEXTURE_ADDRESS_MIRROR,
+        MipLODBias: 0.0,
+        MaxAnisotropy: 1,
+        ComparisonFunc: windows::Win32::Graphics::Direct3D11::D3D11_COMPARISON_NEVER,
+        BorderColor: [0.0, 0.0, 0.0, 0.0],
+        MinLOD: 0.0,
+        MaxLOD: 0.0, // 捕获纹理无 mipmap，只用最高分辨率层
+    };
+    let mut sampler: Option<ID3D11SamplerState> = None;
+    unsafe {
+        device
+            .CreateSamplerState(&desc, Some(&mut sampler))
+            .map_err(RenderError::Windows)?;
+    }
+    Ok(sampler.unwrap())
 }
 
 // 编译期断言：FrameConstants 必须是 32 字节（两个 float4 槽位），与 HLSL cbuffer 对齐。

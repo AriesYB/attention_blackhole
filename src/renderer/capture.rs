@@ -40,12 +40,29 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11ShaderResourceView, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 
 use super::RenderError;
+
+/// 捕获目标：决定 WGC `GraphicsCaptureItem` 从什么创建。
+///
+/// - `Window(HWND)`：捕获单个目标窗口的像素（spec §8.1「吞噬你的代码」原设计）。
+///   WGC 捕获该窗口的合成内容，与 z-order 无关——即使被 overlay 盖住也能拿到。
+/// - `Monitor(HMONITOR)`：捕获整个显示器的真实桌面（「扭曲整个屏幕」）。overlay 自身
+///   已 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` 排除出捕获（见 overlay.rs），
+///   故捕获纹理 = overlay 背后的真实桌面。
+///
+/// 两种范围共用同一套 WGC FramePool/Session/零拷贝管线（`WgcCaptureSource`），
+/// 仅创建 `GraphicsCaptureItem` 时分支（`CreateForWindow` vs `CreateForMonitor`）。
+#[derive(Clone, Copy, Debug)]
+pub enum CaptureTarget {
+    Window(HWND),
+    Monitor(HMONITOR),
+}
 
 /// 捕获源抽象：painter 据它决定 shader 走捕获纹理还是程序化背景。
 pub trait CaptureSource {
@@ -103,28 +120,39 @@ pub struct WgcCaptureSource {
     frame_pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     device: ID3D11Device,
-    /// 最新捕获帧纹理（捕获回调写，painter 读）。
+    /// 最新捕获帧纹理（捕获回调写，painter 读）。WGC FramePool 拥有、我们持 COM 引用。
     latest: Arc<Mutex<Option<ID3D11Texture2D>>>,
-    /// 由 latest 纹理建的 SRV 缓存（纹理变化时重建）。
+    /// 由 latest 纹理建的 SRV（纹理对象变化时重建）。
     cached_srv: Option<ID3D11ShaderResourceView>,
+    /// cached_srv 当前指向的 latest 纹理对象地址（用于判别是否需重建 SRV）。
+    cached_srv_src_ptr: Option<usize>,
     active: bool,
 }
 
 use std::sync::{Arc, Mutex};
 
 impl WgcCaptureSource {
-    /// 尝试从目标 HWND 创建 WGC 捕获源。失败（旧 OS / item 不可创建 / 互操作失败）
-    /// 返回 Err，上层回落 ProceduralCaptureSource。
-    pub fn try_new(device: &ID3D11Device, target_hwnd: HWND) -> Result<Self, RenderError> {
+    /// 尝试从捕获目标（窗口或显示器）创建 WGC 捕获源。失败（旧 OS / item 不可创建 /
+    /// 互操作失败）返回 Err，上层回落 ProceduralCaptureSource。
+    ///
+    /// `target` 决定 `GraphicsCaptureItem` 的来源：`Window` 走 `CreateForWindow`（spec §8.1
+    /// 目标窗口），`Monitor` 走 `CreateForMonitor`（全屏真实桌面）。两者共用同一套
+    /// FramePool/Session/回调/SRV 重建管线——WGC 对两种 item 一视同仁。
+    pub fn try_new(device: &ID3D11Device, target: CaptureTarget) -> Result<Self, RenderError> {
         // 1. 渲染 device → IDirect3DDevice（WinRT 桥接）。
         let d3d_device = create_idirect3d_device(device)?;
 
-        // 2. HWND → GraphicsCaptureItem（桌面互操作路径）。
+        // 2. 捕获目标 → GraphicsCaptureItem（桌面互操作路径）。
         let interop: IGraphicsCaptureItemInterop =
             factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
                 .map_err(RenderError::Windows)?;
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(target_hwnd) }
-            .map_err(RenderError::Windows)?;
+        let item: GraphicsCaptureItem = unsafe {
+            match target {
+                CaptureTarget::Window(hwnd) => interop.CreateForWindow(hwnd),
+                CaptureTarget::Monitor(hmon) => interop.CreateForMonitor(hmon),
+            }
+        }
+        .map_err(RenderError::Windows)?;
 
         // 3. FramePool（free-threaded，不需要 MTA 设备线程）。
         let item_size = item.Size().map_err(RenderError::Windows)?;
@@ -172,46 +200,58 @@ impl WgcCaptureSource {
             device: device.clone(),
             latest,
             cached_srv: None,
+            cached_srv_src_ptr: None,
             active: false,
         })
     }
 
-    /// 读 latest 纹理建/复用 SRV。纹理变化时重建（缓存失效）。
+    /// 每帧调用：保证 SRV 指向最新的捕获纹理。
+    ///
+    /// 直接采样 WGC 的纹理：WGC 的 CreateFreeThreaded FramePool 用 2 个缓冲区轮换，
+    /// 我们持 latest 纹理的 COM 引用（回调里 GetInterface 出来的 ID3D11Texture2D），
+    /// 故 WGC 不会在我们用时释放它——它会用另一个缓冲区。SRV 直接建在 latest 纹理上。
+    ///
+    /// 关键：不用 CopyResource（之前试过，会在第 2 帧死锁——immediate context 上 CopyResource
+    /// 一个 WGC 拥有的 2MP 纹理 + 同时 Draw 采样它，与 WGC 回调线程争用导致卡死）。
+    /// 直接采样 WGC 纹理虽理论上有「内容更新中」风险，但 WGC 的帧切换是原子的
+    ///（整帧替换 latest 指针），采样到的要么是旧帧要么是新帧，不会撕裂。
     fn rebuild_srv(&mut self) {
         let guard = self.latest.lock().unwrap();
-        if let Some(texture) = guard.as_ref() {
-            // 纹理与缓存同一对象 → 复用；否则重建。
-            let same = self
-                .cached_srv
-                .as_ref()
-                .map(|_| false) // 简化：每次纹理变化即重建；精确比较需取底层资源，省略
-                .unwrap_or(false);
-            if same {
-                return;
-            }
-            // 为建 SRV，捕获纹理需是 shader-resource。WGC 返回的纹理默认可作 SRV。
-            let mut srv: Option<ID3D11ShaderResourceView> = None;
-            let desc = windows::Win32::Graphics::Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC {
-                Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
-                ViewDimension: windows::Win32::Graphics::Direct3D::D3D_SRV_DIMENSION_TEXTURE2D,
-                Anonymous: windows::Win32::Graphics::Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
-                    Texture2D: windows::Win32::Graphics::Direct3D11::D3D11_TEX2D_SRV {
-                        MostDetailedMip: 0,
-                        MipLevels: u32::MAX,
-                    },
+        let Some(src) = guard.as_ref() else {
+            self.cached_srv = None;
+            return;
+        };
+        // 纹理对象变了（WGC 轮到另一个缓冲区）→ 重建 SRV；否则复用。
+        // 用 COM 指针地址做标识（同一缓冲区对象地址不变）。
+        let cur_ptr = std::ptr::addr_of!(*src) as usize;
+        let need_rebuild = match self.cached_srv_src_ptr {
+            Some(p) => p != cur_ptr,
+            None => true,
+        };
+        if !need_rebuild {
+            return;
+        }
+        let mut srv: Option<ID3D11ShaderResourceView> = None;
+        let desc = windows::Win32::Graphics::Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC {
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+            ViewDimension: windows::Win32::Graphics::Direct3D::D3D_SRV_DIMENSION_TEXTURE2D,
+            Anonymous: windows::Win32::Graphics::Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture2D: windows::Win32::Graphics::Direct3D11::D3D11_TEX2D_SRV {
+                    MostDetailedMip: 0,
+                    MipLevels: u32::MAX,
                 },
-            };
-            let r = unsafe {
-                self.device
-                    .CreateShaderResourceView(texture, Some(&desc), Some(&mut srv))
-            };
-            if r.is_ok() {
-                self.cached_srv = srv;
-            } else {
-                self.cached_srv = None;
-            }
+            },
+        };
+        let r = unsafe {
+            self.device
+                .CreateShaderResourceView(src, Some(&desc), Some(&mut srv))
+        };
+        if r.is_ok() {
+            self.cached_srv = srv;
+            self.cached_srv_src_ptr = Some(cur_ptr);
         } else {
             self.cached_srv = None;
+            self.cached_srv_src_ptr = None;
         }
     }
 }
@@ -236,10 +276,11 @@ impl CaptureSource for WgcCaptureSource {
                 self.active = false;
             }
         } else {
-            // 停止 + 清纹理与 SRV（隐私：立即释放捕获纹理，不残留）。
+            // 停止 + 清纹理/SRV（隐私：立即释放捕获纹理，不残留）。
             let _ = self.session.Close();
             *self.latest.lock().unwrap() = None;
             self.cached_srv = None;
+            self.cached_srv_src_ptr = None;
         }
     }
 
@@ -253,6 +294,7 @@ impl Drop for WgcCaptureSource {
         let _ = self.session.Close();
         *self.latest.lock().unwrap() = None;
         self.cached_srv = None;
+        self.cached_srv_src_ptr = None;
     }
 }
 

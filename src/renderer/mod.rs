@@ -50,6 +50,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Graphics::Gdi::HMONITOR;
 
 use capture::CaptureSource;
 use crate::controller::{Frame, Renderer};
@@ -71,12 +72,15 @@ pub struct D3D11Renderer {
 impl D3D11Renderer {
     /// 构造渲染器。
     ///
-    /// - `target_hwnd`：注意力目标窗口（WGC 捕获源；None 或 consent=false 时走程序化）。
+    /// - `capture_target`：捕获目标（窗口或显示器）。`Window` 捕获目标窗口像素
+    ///   （spec §8.1「吞噬你的代码」）；`Monitor` 捕获整个显示器的真实桌面
+    ///   （overlay 已 WDA_EXCLUDEFROMCAPTURE 自排除）。None 或 consent=false 时走程序化。
     /// - `consent`：用户是否同意屏幕捕获。false → 永远用 ProceduralCaptureSource。
     ///
     /// 所有 D3D11/WGC 资源（含 overlay HWND）在**渲染线程内**创建并独占——这些资源
-    /// 非 Send（含 HWND 裸指针），故不在主线程创建后 move，而是经初始化结果回传。
-    pub fn new(target_hwnd: Option<HWND>, consent: bool) -> Result<Self, RenderError> {
+    /// 非 Send（含 HWND/HMONITOR 裸指针），故不在主线程创建后 move，而是经初始化结果回传。
+    /// `CaptureTarget` 跨线程用 (kind, raw_usize) 编码传递，线程内转回。
+    pub fn new(capture_target: Option<capture::CaptureTarget>, consent: bool) -> Result<Self, RenderError> {
         let latest = Arc::new(Mutex::new(None::<Frame>));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         // 初始化结果：线程创建完资源后写 Ok，失败写 Err。主线程 spin 等它就绪。
@@ -86,15 +90,23 @@ impl D3D11Renderer {
         let stop_t = stop.clone();
         let init_t = init_result.clone();
 
-        // HWND 非 Send（裸指针）：转 usize 跨线程传递，线程内转回。
-        let target_hwnd_raw = target_hwnd.map(|h| h.0 as usize);
+        // HWND/HMONITOR 非 Send（裸指针）：跨线程用 (kind, raw_usize) 编码。
+        // kind: 0=Window(HWND), 1=Monitor(HMONITOR)。
+        let target_enc = capture_target.map(|t| match t {
+            capture::CaptureTarget::Window(h) => (0u8, h.0 as usize),
+            capture::CaptureTarget::Monitor(h) => (1u8, h.0 as usize),
+        });
 
         let handle = thread::Builder::new()
             .name("abh-render".into())
             .spawn(move || {
-                let target_hwnd = target_hwnd_raw.map(|raw| HWND(raw as *mut std::ffi::c_void));
+                // 线程内还原 CaptureTarget（裸指针转回）。
+                let capture_target = target_enc.map(|(kind, raw)| match kind {
+                    0 => capture::CaptureTarget::Window(HWND(raw as *mut std::ffi::c_void)),
+                    _ => capture::CaptureTarget::Monitor(HMONITOR(raw as *mut std::ffi::c_void)),
+                });
                 // 线程内创建全部资源（非 Send，独占本线程）。
-                let started = match start_render_resources(target_hwnd, consent) {
+                let started = match start_render_resources(capture_target, consent) {
                     Ok(res) => {
                         *init_t.lock().unwrap() = Some(Ok(()));
                         res
@@ -152,6 +164,8 @@ struct RenderResources {
     d3d: d3d::D3D11Context,
     shaders: shader::Shaders,
     cbuffer: windows::Win32::Graphics::Direct3D11::ID3D11Buffer,
+    /// 线性采样器（s0）：让透镜扭曲后的捕获纹理采样平滑（plan-3 should-fix #4）。
+    sampler: windows::Win32::Graphics::Direct3D11::ID3D11SamplerState,
     rtv: windows::Win32::Graphics::Direct3D11::ID3D11RenderTargetView,
     capture: Box<dyn CaptureSource + Send>,
 }
@@ -159,7 +173,7 @@ struct RenderResources {
 /// 在渲染线程内创建 overlay + device + shaders + cbuffer + capture。
 /// 这些资源非 Send，故必须在将使用它们的线程内构造。
 fn start_render_resources(
-    target_hwnd: Option<HWND>,
+    capture_target: Option<capture::CaptureTarget>,
     consent: bool,
 ) -> Result<RenderResources, RenderError> {
     // 1. overlay 窗口（全屏透明置顶，提供 HWND + 尺寸）。
@@ -170,9 +184,10 @@ fn start_render_resources(
     // 2. D3D11 设备 + SwapChain（绑定 overlay HWND）。
     let d3d = d3d::D3D11Context::new(hwnd, w, h)?;
 
-    // 3. 编译 shader + cbuffer。
+    // 3. 编译 shader + cbuffer + 线性采样器。
     let shaders = shader::Shaders::new(&d3d.device)?;
     let cbuffer = shader::create_frame_constants_buffer(&d3d.device)?;
+    let sampler = shader::create_linear_sampler(&d3d.device)?;
 
     // 3b. SwapChain backbuffer → RenderTargetView。PS 输出必须有 RTV 才会写进 backbuffer，
     //     否则 Present 呈现空白。RTV 一次性创建，每帧复用（OMSetRenderTargets）。
@@ -185,9 +200,11 @@ fn start_render_resources(
     }
     let rtv = rtv.unwrap();
 
-    // 4. 捕获源：consent + 有目标 HWND 才尝试 WGC，否则程序化降级。
-    let capture: Box<dyn CaptureSource + Send> = match (target_hwnd, consent) {
-        (Some(hwnd), true) => match capture::WgcCaptureSource::try_new(&d3d.device, hwnd) {
+    // 4. 捕获源：consent + 有捕获目标才尝试 WGC，否则程序化降级。
+    //    Window → 目标窗口捕获（spec §8.1）；Monitor → 整个显示器真实桌面捕获
+    //    （overlay 已 WDA_EXCLUDEFROMCAPTURE 自排除，破反馈环）。
+    let capture: Box<dyn CaptureSource + Send> = match (capture_target, consent) {
+        (Some(target), true) => match capture::WgcCaptureSource::try_new(&d3d.device, target) {
             Ok(src) => Box::new(src),
             Err(e) => {
                 eprintln!(
@@ -205,6 +222,7 @@ fn start_render_resources(
         d3d,
         shaders,
         cbuffer,
+        sampler,
         rtv,
         capture,
     })
@@ -221,15 +239,16 @@ fn render_loop(
         d3d,
         shaders,
         cbuffer,
+        sampler,
         rtv,
         mut capture,
     } = res;
     let resolution = (_overlay.size.width as f32, _overlay.size.height as f32);
     let start = Instant::now();
-    let frame_budget = std::time::Duration::from_millis(16);
 
     while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-        let frame_start = Instant::now();
+        let _frame_start = Instant::now();
+        // 取最新 Frame（无则跳过绘制，但仍 Present 上一帧，避免画面冻结）。
 
         // 取最新 Frame（无则跳过绘制，但仍 Present 上一帧，避免画面冻结）。
         let frame = { *latest.lock().unwrap() };
@@ -244,6 +263,7 @@ fn render_loop(
                 input_layout: &shaders.input_layout,
                 cbuffer: &cbuffer,
                 rtv: &rtv,
+                sampler: &sampler,
                 capture: capture.as_mut(),
             };
             let now = start.elapsed().as_secs_f32();
@@ -256,10 +276,12 @@ fn render_loop(
             eprintln!("abh-render: present error: {:?}", e);
         }
 
-        let elapsed = frame_start.elapsed();
-        if elapsed < frame_budget {
-            thread::sleep(frame_budget - elapsed);
-        }
+        // 帧率控制：Present(1) 已对齐 VSync（阻塞到下一个刷新周期），故不再额外 sleep。
+        // 之前的 thread::sleep(16ms-elapsed) 受 Windows 默认定时器粒度（15.6ms）影响，
+        // 容易睡过头（16→31ms），把帧率从 60 拖到 ~30-45fps。去掉 sleep 后渲染线程
+        // 以显示器刷新率（60/120/144Hz）节拍运行，盘旋转更流畅。仅让出一次避免纯忙等。
+        let _ = _frame_start;
+        thread::yield_now();
     }
     // 退出前停捕获（隐私：释放纹理）。
     capture.set_active(false);

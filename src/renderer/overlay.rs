@@ -9,6 +9,11 @@
 //! WS_EX_TRANSPARENT 让 hit-test 永远透传，故本窗口收不到鼠标输入——
 //! ForcedBreak 的真实输入捕获留 Plan 5（届时切样式为非透明+捕获）。
 //!
+//! **捕获自排除**：建窗后立即 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`，
+//! 把 overlay 从任何 WGC 屏幕捕获中排除——否则捕获全屏显示器会把 overlay 自身（黑洞
+//! 渲染结果）也捕获进来，形成无限自指反馈环。排除后 WGC 捕获纹理里 overlay 区域为
+//! 透明，shader 采样到的就是 overlay 背后的真实桌面，引力透镜才扭曲真实屏幕内容。
+//!
 //! NOTE: Task 1 阶段为 dead_code，Task 5 由 D3D11Renderer 接入后此 allow 可移除。
 #![allow(dead_code)]
 
@@ -22,9 +27,10 @@ use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::{
     self as wm, CreateWindowExW, DefWindowProcW, DispatchMessageW, LoadCursorW, PeekMessageW,
-    PostThreadMessageW, RegisterClassExW, TranslateMessage, HCURSOR, IDC_ARROW, MSG,
-    PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_NCCREATE, WM_QUIT, WM_TIMER,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    PostThreadMessageW, RegisterClassExW, SetWindowDisplayAffinity, TranslateMessage, HCURSOR,
+    IDC_ARROW, MSG, PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_NCCREATE, WM_QUIT,
+    WM_TIMER, WNDCLASSEXW, WDA_EXCLUDEFROMCAPTURE, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_POPUP,
 };
 
 use super::RenderError;
@@ -241,6 +247,18 @@ unsafe fn create_overlay_window(
 
     // 显式 ShowWindow：WS_POPUP 默认不可见。
     let _ = wm::ShowWindow(hwnd, wm::SW_SHOWNORMAL);
+
+    // 把 overlay 自身从 WGC 屏幕捕获中排除，打破「捕获包含 overlay → overlay 画捕获 → 无限
+    // 自指」的反馈环。这样 WGC 捕获本显示器时，overlay 区域在捕获纹理里是透明/黑，
+    // shader 采样到的就是 overlay **背后**的真实桌面，引力透镜才能扭曲真实屏幕内容。
+    // WDA_EXCLUDEFROMCAPTURE 需 Win10 2004+（本项目已要求）；旧 OS 退化为 WDA_MONITOR
+    // （overlay 区域捕获为黑块），不致命——失败仅记日志，窗口仍正常显示。
+    if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_err() {
+        eprintln!(
+            "abh-overlay: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) failed; \
+             real-screen-capture will include this overlay (feedback-loop risk)"
+        );
+    }
 
     // 把 HWND 原始指针值写回，供 new 取回（AtomicUsize 可跨线程）。
     hwnd_raw.store(hwnd.0 as usize, Ordering::SeqCst);
