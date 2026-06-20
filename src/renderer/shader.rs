@@ -25,6 +25,32 @@ use windows::Win32::Graphics::Direct3D11::{
 
 use super::RenderError;
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ShaderOptions {
+    pub ornament_center: [f32; 2],
+    pub size_scale: f32,
+    pub mode_flags: u32,
+    pub visual_params: [f32; 4],
+    pub disk_tint: [f32; 4],
+    pub disk_params: [f32; 4],
+}
+
+impl Default for ShaderOptions {
+    fn default() -> Self {
+        Self {
+            ornament_center: [0.5, 0.5],
+            size_scale: 1.0,
+            mode_flags: 0,
+            visual_params: [1.0, 1.0, 1.0, 1.0],
+            disk_tint: [1.0, 1.0, 1.0, 0.0],
+            disk_params: [0.92, 1.0, 1.0, 0.0],
+        }
+    }
+}
+
+pub const MODE_ORNAMENT_CENTER: u32 = 0x1;
+
 /// cbuffer FrameConstants 的 Rust 镜像。布局必须与 blackhole.hlsl 的 cbuffer 完全一致
 ///（含 padding 对齐）。HLSL cbuffer 按 16 字节 pack：见各字段注释。
 #[repr(C)]
@@ -39,10 +65,38 @@ pub struct FrameConstants {
     pub u_resolution: [f32; 2],
     pub u_has_capture: u32,
     _pad1: f32,
+    /// 第三个 float4 槽位：宿主控制中心点、尺寸倍率、模式标志。
+    pub u_ornament_center: [f32; 2],
+    pub u_size_scale: f32,
+    pub u_mode_flags: u32,
+    /// 第四个 float4 槽位：质量/透镜、环范围、吸积盘强度、保留。
+    pub u_visual_params: [f32; 4],
+    /// 第五个 float4 槽位：吸积盘颜色乘子。
+    pub u_disk_tint: [f32; 4],
+    /// 第六个 float4 槽位：吸积盘倾角、范围、活跃度、保留。
+    pub u_disk_params: [f32; 4],
 }
 
 impl FrameConstants {
     pub fn new(load: f32, dim: f32, time: f32, resolution: (f32, f32), has_capture: bool) -> Self {
+        Self::new_with_options(
+            load,
+            dim,
+            time,
+            resolution,
+            has_capture,
+            ShaderOptions::default(),
+        )
+    }
+
+    pub fn new_with_options(
+        load: f32,
+        dim: f32,
+        time: f32,
+        resolution: (f32, f32),
+        has_capture: bool,
+        options: ShaderOptions,
+    ) -> Self {
         Self {
             u_load: load,
             u_dim: dim,
@@ -51,6 +105,12 @@ impl FrameConstants {
             u_resolution: [resolution.0, resolution.1],
             u_has_capture: if has_capture { 1 } else { 0 },
             _pad1: 0.0,
+            u_ornament_center: options.ornament_center,
+            u_size_scale: options.size_scale,
+            u_mode_flags: options.mode_flags,
+            u_visual_params: options.visual_params,
+            u_disk_tint: options.disk_tint,
+            u_disk_params: options.disk_params,
         }
     }
 }
@@ -199,10 +259,10 @@ pub fn create_linear_sampler(device: &ID3D11Device) -> Result<ID3D11SamplerState
     Ok(sampler.unwrap())
 }
 
-// 编译期断言：FrameConstants 必须是 32 字节（两个 float4 槽位），与 HLSL cbuffer 对齐。
+// 编译期断言：FrameConstants 必须是 96 字节（六个 float4 槽位），与 HLSL cbuffer 对齐。
 const _: () = assert!(
-    size_of::<FrameConstants>() == 32,
-    "FrameConstants must be 32 bytes (two float4 slots) to match HLSL cbuffer packing"
+    size_of::<FrameConstants>() == 96,
+    "FrameConstants must be 96 bytes (six float4 slots) to match HLSL cbuffer packing"
 );
 
 #[cfg(test)]
@@ -218,6 +278,12 @@ mod tests {
         assert!((c.u_time - 12.5).abs() < 1e-6);
         assert_eq!(c.u_resolution, [1920.0, 1080.0]);
         assert_eq!(c.u_has_capture, 1);
+        assert_eq!(c.u_ornament_center, [0.5, 0.5]);
+        assert_eq!(c.u_size_scale, 1.0);
+        assert_eq!(c.u_mode_flags, 0);
+        assert_eq!(c.u_visual_params, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(c.u_disk_tint, [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(c.u_disk_params, [0.92, 1.0, 1.0, 0.0]);
     }
 
     /// has_capture=false 时 u_has_capture=0（shader 据此走程序化背景分支）。
@@ -234,6 +300,31 @@ mod tests {
         assert_eq!(c.u_load, 0.0);
         assert_eq!(c.u_has_capture, 0);
         assert_eq!(c.u_resolution, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn frame_constants_shader_options_mapped() {
+        let c = FrameConstants::new_with_options(
+            0.8,
+            0.0,
+            1.0,
+            (1280.0, 720.0),
+            true,
+            ShaderOptions {
+                ornament_center: [0.25, 0.75],
+                size_scale: 0.6,
+                mode_flags: MODE_ORNAMENT_CENTER,
+                visual_params: [1.2, 0.8, 0.4, 1.5],
+                disk_tint: [1.0, 0.6, 0.25, 0.0],
+                disk_params: [0.7, 1.4, 0.9, 0.0],
+            },
+        );
+        assert_eq!(c.u_ornament_center, [0.25, 0.75]);
+        assert_eq!(c.u_size_scale, 0.6);
+        assert_eq!(c.u_mode_flags, MODE_ORNAMENT_CENTER);
+        assert_eq!(c.u_visual_params, [1.2, 0.8, 0.4, 1.5]);
+        assert_eq!(c.u_disk_tint, [1.0, 0.6, 0.25, 0.0]);
+        assert_eq!(c.u_disk_params, [0.7, 1.4, 0.9, 0.0]);
     }
 }
 

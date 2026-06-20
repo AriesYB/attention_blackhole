@@ -22,6 +22,8 @@ features = [
     "Win32_UI_WindowsAndMessaging", # SetWindowsHookExW / WH_*_LL / KBDLLHOOKSTRUCT
                                     #   GetForegroundWindow / GetWindowTextW
                                     #   GetMessageW / PostThreadMessageW / CallNextHookEx
+    "Win32_UI_Input_KeyboardAndMouse", # SetCapture / ReleaseCapture for draggable ornament mode
+    "Win32_UI_Shell",              # Shell_NotifyIconW tray icon for ornament mode
     # Plan 3 —— D3D11 渲染设备与交换链
     "Win32_Graphics_Direct3D",      # D3D_FEATURE_LEVEL_* / D3D11CreateDevice
     "Win32_Graphics_Direct3D_Fxc",  # D3DCompile + ID3DBlob / ID3DInclude（shader 运行时编译）

@@ -43,10 +43,19 @@ cbuffer FrameConstants : register(b0)
     float2 u_resolution; // backbuffer 像素尺寸
     uint  u_has_capture; // 1 = 用捕获纹理背景，0 = 程序化背景
     float _pad1;         // 对齐
+    float2 u_ornament_center; // 摆件模式由宿主传入的中心点（UV）
+    float u_size_scale;       // 摆件/外部模式尺寸倍率；<=0 时按 1.0
+    uint  u_mode_flags;       // bit0 = 使用外部中心点
+    float4 u_visual_params;   // x=质量/弯曲 y=爱因斯坦环范围 z=吸积盘强度 w=透镜强度
+    float4 u_disk_tint;       // rgb=吸积盘颜色乘子
+    float4 u_disk_params;     // x=倾角 y=范围 z=活跃度 w=相对论强度（<=0 用默认）
 };
 
 Texture2D    u_capturedTexture : register(t0);
 SamplerState u_sampler         : register(s0);
+
+// Host-controlled render modes.
+#define MODE_ORNAMENT_CENTER 0x1u
 
 // -----------------------------------------------------------------------------
 // 旋钮（顶部 #define，便于按目标 GPU 调）。
@@ -60,8 +69,7 @@ SamplerState u_sampler         : register(s0);
 // 远看即影子半径。物理常数（非可调），#define 以免被误改。
 #define B_CRIT 2.5980762
 
-// GLSL `mod(a,b)` 对负数的行为（结果与 b 同号）。HLSL `fmod` 是截断除法（与 a 同号），
-// vnoiseWrapY 的无缝包裹依赖 GLSL 语义，故复刻之。
+// GLSL `mod(a,b)` 对负数的行为（结果与 b 同号）。HLSL `fmod` 是截断除法（与 a 同号）。
 #define glmod(x, y) ((x) - (y) * floor((x) / (y)))
 
 // 盘视觉参数 —— 对齐 ghostty-blackhole **tuner Defaults**（电影级卡冈图雅观感）。
@@ -76,12 +84,11 @@ SamplerState u_sampler         : register(s0);
 #define DISK_OPACITY 0.65   // 近侧盘对后景的遮挡程度（Defaults 0.65，不过厚）
 #define DISK_TEMP    8500.0 // 最热环带色温（K）：8500 = 白热偏蓝内圈，5500 偏暖
 #define DOPPLER_MIX  1.00   // 0=无相对论明暗/色偏，1=满物理（Defaults 满效应）
+#define REDSHIFT_TINT 0.55  // 额外可见化引力红移色偏；不改测地线，只让内圈更暖一点。
 #define DISK_BEAM    3.00   // beaming 指数：观测强度 ∝ g^N（3≈光子计数，4≡热辐射）
-#define DISK_SPEED   7.00   // streak 旋转速度（负值反向）。从 Defaults 3.6 调高到 7，
-                            // 让螺旋纹丝旋转更明显（用户反馈「转的但可以更快」）。
-#define DISK_WIND    5.00   // 螺旋旋臂缠绕紧密度
-#define DISK_CONTR   2.20   // 条纹对比度：0 平滑霾，大=锐利丝缕。从 Defaults 0.9 调高到
-                            // 2.2 让螺旋纹丝肉眼明显（避免「盘是一整块色」的观感），旋转随之可见。
+#define DISK_SPEED   9.00   // 磨砂颗粒流动速度；本端口正值表示屏幕左侧朝向观察者。
+#define DISK_WIND    6.50   // 磨砂云雾随半径的轻微流动量
+#define DISK_CONTR   2.80   // 磨砂颗粒对比度；过高会重新显出采样噪点。
 #define EXPOSURE     1.00   // 盘光的 tonemap 曝光（捕获纹理不受影响）
 #define LENS_DEPTH   13.00  // 从洞到 capture「天」平面的距离（r_s）。ghostty 默认 13，越大内容弯得越狠。
 #define LENS_STRENGTH 0.68  // overlay 适配：整体透镜位移强度。低一些会降低“放大镜倍率”。
@@ -113,7 +120,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID)
 // -----------------------------------------------------------------------------
 // 噪声 / 工具
 
-// 简单 hash 噪声（程序化星云 + 盘 streak 用，避免引入噪声库）。
+// 简单 hash 噪声（程序化星云 + 吸积盘磨砂颗粒用，避免引入噪声库）。
 float hash21(float2 p)
 {
     p = frac(p * float2(234.34, 435.345));
@@ -121,16 +128,21 @@ float hash21(float2 p)
     return frac(p.x * p.y);
 }
 
-// value noise，其 y 格子每 perY 格回绕——用于盘的角度维让 streak 跨过 atan 分支
-// 切断无缝拼接（perY 必须是整数；y 每转一圈精确前进 perY 格）。
-float vnoiseWrapY(float2 p, float perY)
+float vnoise(float2 p)
 {
     float2 i = floor(p), f = frac(p);
     f = f * f * (3.0 - 2.0 * f);
-    float y0 = glmod(i.y, perY), y1 = glmod(i.y + 1.0, perY);
-    return lerp(lerp(hash21(float2(i.x, y0)),       hash21(float2(i.x + 1.0, y0)), f.x),
-                lerp(hash21(float2(i.x, y1)),       hash21(float2(i.x + 1.0, y1)), f.x),
+    return lerp(lerp(hash21(i),                         hash21(i + float2(1.0, 0.0)), f.x),
+                lerp(hash21(i + float2(0.0, 1.0)),       hash21(i + float2(1.0, 1.0)), f.x),
                 f.y);
+}
+
+float matteNoise(float2 p)
+{
+    float n0 = vnoise(p);
+    float n1 = vnoise(p * 1.75 + float2(13.1, 5.7));
+    float n2 = vnoise(p * 2.65 + float2(-2.8, 17.2));
+    return n0 * 0.56 + n1 * 0.30 + n2 * 0.14;
 }
 
 // 镜像重复：让透镜后的纹理采样不出界又不边缘涂抹（对应 GLSL 版 mirrorUV）。
@@ -290,9 +302,23 @@ float4 ps_main(VSOut i) : SV_Target
     // u_load → 主填充 g（0..1）→ 强度 I 与影子半径 rh。
     // rh 上限调小到 0.15（从 0.35）：用户要「黑洞最大时透镜占满屏，而非黑洞占满」。
     // 用 pow(g_load, 0.7) 让涨缩更缓（前期慢长、后期才明显），避免「变大太快」。
+    float sizeScale = clamp(u_size_scale > 0.0 ? u_size_scale : 1.0, 0.35, 2.0);
+    float massScale = clamp(u_visual_params.x > 0.0 ? u_visual_params.x : 1.0, 0.35, 2.0);
+    float ringScale = clamp(u_visual_params.y > 0.0 ? u_visual_params.y : 1.0, 0.45, 2.2);
+    float diskUser = saturate(u_visual_params.z);
+    float lensScale = clamp(u_visual_params.w > 0.0 ? u_visual_params.w : 1.0, 0.25, 2.0);
+    float3 diskTint = max(u_disk_tint.rgb, float3(0.0, 0.0, 0.0));
+    float diskTilt = saturate(u_disk_params.x);
+    float diskSpan = clamp(u_disk_params.y > 0.0 ? u_disk_params.y : 1.0, 0.60, 1.80);
+    float diskActivity = clamp(u_disk_params.z > 0.0 ? u_disk_params.z : 1.0, 0.05, 1.40);
+    float relativityMix = clamp(u_disk_params.w > 0.0 ? u_disk_params.w : DOPPLER_MIX, 0.0, 1.0);
     float g_load = clamp(u_load, 0.0, 1.0);
-    float I = lerp(0.10, 1.0, g_load);
-    float rh = lerp(0.015, 0.15, pow(g_load, 0.7)); // 屏幕高度单位，1.5%→15%，黑洞本身不大
+    float sizeGrowth = smoothstep(0.35, 1.30, sizeScale);
+    float growth = ((u_mode_flags & MODE_ORNAMENT_CENTER) != 0) ? sizeGrowth : g_load;
+    float massDisk = smoothstep(0.45, 1.75, massScale);
+    float I = lerp(0.10, 1.0, growth);
+    float rh = lerp(0.015, 0.15, pow(growth, 0.7)); // 屏幕高度单位，1.5%→15%，黑洞本身不大
+    rh *= sizeScale;
 
     // 黑洞在屏幕上漂移（忠实 ghostty pomodoro 模式的双尺度 Lissajous，blackhole.glsl:336-349）。
     // 两层叠加：(1) 慢的大幅度漂移（0.21/0.083 频率，0.24/0.05 幅度）——洞「游走」；
@@ -302,12 +328,19 @@ float4 ps_main(VSOut i) : SV_Target
     // 故中心绕 (0.5,0.5)，幅度按 ghostty 的比例缩到合适范围。
     float spd = lerp(0.35, 1.0, I);
     float2 center = float2(0.5, 0.5);
+    if ((u_mode_flags & MODE_ORNAMENT_CENTER) != 0)
+    {
+        center = saturate(u_ornament_center);
+    }
+    else
+    {
     // 慢漂移（×0.12 控制整体幅度，比 ghostty 的 0.24 略小，避免洞跑太远出屏）。
     center += float2(0.12 * sin(u_time * 0.21) + 0.025 * sin(u_time * 0.083),
                      0.10 * sin(u_time * 0.157 + 2.0) + 0.02 * sin(u_time * 0.117)) * spd;
     // 快抖动（×I，小洞几乎不颤，大洞明显颤）。
     center += I * float2(0.040 * sin(u_time * 0.83) + 0.020 * sin(u_time * 1.31),
                          0.030 * sin(u_time * 1.03 + 1.0));
+    }
 
     // vis：I 极小时整体淡出（种子洞几乎不可见）。
     float vis = smoothstep(0.0, 0.10, I);
@@ -317,18 +350,27 @@ float4 ps_main(VSOut i) : SV_Target
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    // **盘渐显**：小黑洞阶段（I 低）**无吸积盘**，只有视界 + 周围一圈透镜扭曲；
-    // 洞长到中段盘才浮现，大洞满盘。这是用户要的「无盘→长盘」阶段感。
-    // diskPresence：I 在 0.20→0.60 之间从 0 平滑到 1——小洞无盘、中段渐显、大洞满盘。
-    float diskPresence = smoothstep(0.20, 0.60, I);
+    // 吸积盘是否出现只由宿主的开关/强度控制；黑洞大小只影响盘半径和运动尺度。
+    float diskPresence = diskUser;
+    float diskOn = diskUser > 0.001 ? 1.0 : 0.0;
+    float diskShape = diskOn * saturate(0.72 + 0.28 * diskActivity);
+    float diskRadiusGrowth = lerp(0.72, 1.34, saturate(growth))
+                           * lerp(0.92, 1.20, massDisk);
 
     // 引力时间膨胀：洞越重盘图案越慢（ghostty 主题特征）。
-    float dil = lerp(1.0, DILATION_MIN, I);
+    float dil = lerp(1.0, DILATION_MIN, saturate(diskShape * lerp(0.75, 1.25, massDisk)));
     float t = u_time;
 
     // 盘 extent（r_s），sanitize：内边缘留在光子球外。
-    float rin  = max(DISK_INNER, 1.6);
-    float rout = max(DISK_OUTER, rin + 0.5);
+    float rin  = max(lerp(2.2, DISK_INNER, diskShape), 1.45);
+    float rout = max(lerp(4.8, DISK_OUTER * diskSpan * diskRadiusGrowth, diskShape), rin + 0.8);
+    float diskGainScale = lerp(0.86, 1.24, diskActivity) * lerp(0.90, 1.24, massDisk)
+                        * lerp(0.95, 1.12, saturate(growth));
+    float diskOpacityScale = lerp(0.48, 1.0, diskActivity);
+    float diskTempScale = lerp(0.90, 1.10, diskActivity) * lerp(0.88, 1.20, massDisk);
+    float diskGrainScale = lerp(0.92, 1.55, diskActivity) * lerp(0.85, 1.18, diskSpan)
+                         * lerp(0.78, 1.12, saturate(growth));
+    float diskIncl = lerp(0.20, 1.55, diskTilt);
 
     // aspect 校正、以洞为中心（y 用屏幕高度单位）。
     float2 p    = (uv - center) * float2(aspect, 1.0);
@@ -339,7 +381,7 @@ float4 ps_main(VSOut i) : SV_Target
     // 是未偏移的真实桌面，于是会像放大镜边缘一样断开。这里让 warpMask 在 alpha 淡出
     // 之前归零：边缘处采样坐标回到当前像素，和透明后的桌面连续。
     // radialFlatten 从中段就开始降低位移，并平方压低边缘梯度，让越靠边越平。
-    float lensReach = lerp(0.3, 0.5, I);
+    float lensReach = lerp(0.3, 0.5, I) * sizeScale * ringScale;
     float radialFlatten = 1.0 - smoothstep(lensReach * LENS_FLAT_START, lensReach, plen);
     float warpMask = radialFlatten * radialFlatten * vis;
     float lensVis = (1.0 - smoothstep(lensReach, lensReach * 1.15, plen)) * vis;
@@ -352,7 +394,7 @@ float4 ps_main(VSOut i) : SV_Target
     // 距离窗口（忠实 ghostty）：透镜偏折幅度随 7rh 衰减——只衰减**位移幅度**，
     // 不衰减颜色/alpha。这是 ghostty 让远处文字稳定、近处弯曲的关键。
     float window = exp(-pow(plen / (7 * rh), 2.0));
-    float warp = window * warpMask * LENS_STRENGTH;
+    float warp = window * warpMask * LENS_STRENGTH * lensScale;
 
     float bmax = rout + 3.0;            // 超过此 b 的射线碰不到盘（弱场区起点）
     float Z0   = max(14.0, rout + 5.0); // 相机距离
@@ -370,7 +412,7 @@ float4 ps_main(VSOut i) : SV_Target
         // 有限相机拟合偏折（与测地线在边界偏差<1%，消除圆形接缝）。
         float defl = (2.0 / (W * W)) / max(plen, 1e-4)
                    * (1.29 * u + 0.07) * max(LENS_DEPTH - 2.14 * u + 0.75, 0.0)
-                   * warp;
+                   * warp * massScale;
         float2 dir = p / max(plen, 1e-5);
         // 微弱色差：蓝比红弯得多一点，远离交接圆淡出。
         float ab = 0.035 * smoothstep(1.0, 2.0, b / bmax);
@@ -400,11 +442,14 @@ float4 ps_main(VSOut i) : SV_Target
         float3 v = float3(0.0, 0.0, -1.0);
         float h2 = dot(pr, pr);
 
-        // 盘平面法向量绕屏幕 x 轴倾斜 DISK_INCL。
-        float ci2 = cos(DISK_INCL), si2 = sin(DISK_INCL);
-        float3 nrm = float3(0.0, si2, ci2);
-        float3 e2  = float3(0.0, ci2, -si2);
-        float sdir = DISK_SPEED < 0.0 ? -1.0 : 1.0;
+        // 盘平面法向量绕屏幕 x 轴倾斜。D3D 这里的屏幕 y 已经按物理相机方向处理，
+        // 因此倾角符号相对 ghostty GLSL 需要反过来，避免吸积盘近/远侧上下颠倒。
+        float ci2 = cos(diskIncl), si2 = sin(diskIncl);
+        float3 nrm = float3(0.0, -si2, ci2);
+        float3 e2  = float3(0.0, ci2, si2);
+        // 倾角翻转后，轨道方向也要随端口约定翻转；正值时左侧气体朝向观察者，
+        // 因而左侧得到多普勒蓝移和 beaming 增亮。
+        float sdir = DISK_SPEED < 0.0 ? 1.0 : -1.0;
         float spd  = abs(DISK_SPEED);
 
         float sPrev = dot(x, nrm);
@@ -421,12 +466,12 @@ float4 ps_main(VSOut i) : SV_Target
             float r = sqrt(r2);
             float dt = clamp(0.16 * r, 0.03, 1.5);
             // leapfrog（kick-drift-kick）。
-            float3 a = -1.5 * h2 * x / (r2 * r2 * r);
+            float3 a = -1.5 * h2 * massScale * x / (r2 * r2 * r);
             v += a * (0.5 * dt);
             x += v * dt;
             r2 = dot(x, x);
             r  = sqrt(r2);
-            a  = -1.5 * h2 * x / (r2 * r2 * r);
+            a  = -1.5 * h2 * massScale * x / (r2 * r2 * r);
             v += a * (0.5 * dt);
 
             // 薄盘穿越。
@@ -438,31 +483,59 @@ float4 ps_main(VSOut i) : SV_Target
                 float rc = length(xc);
                 if (rc > rin && rc < rout)
                 {
-                    float band = smoothstep(rin, rin * 1.25, rc)
-                               * (1.0 - smoothstep(rout * 0.70, rout, rc));
-                    float phi   = atan2(dot(xc, e2), xc.x);
-                    float turns = phi / 6.2831853;
+                    float rcWidth = max(W / max(res.y, 1.0) * 2.0, 0.015);
+                    float band = smoothstep(rin, rin * 1.16 + rcWidth * 1.5, rc)
+                               * (1.0 - smoothstep(rout * 0.78 - rcWidth * 2.0, rout, rc));
                     float kep   = pow(rin / rc, 1.5);
                     float gloc  = sqrt(max(1.0 - 1.5 / rc, 0.02));
-                    float swirl = rc * DISK_WIND * 0.12 - t * kep * spd * gloc * dil * sdir;
-                    float streaks = vnoiseWrapY(float2(rc * 2.8, turns * 19.0 + swirl * 3.0), 19.0) * 0.65 +
-                                    vnoiseWrapY(float2(rc * 1.0, turns * 9.0 + swirl * 1.5 + 7.0), 9.0) * 0.35;
-                    streaks = 0.35 + DISK_CONTR * streaks * streaks;
+                    float2 diskLocal = float2(xc.x, dot(xc, e2));
+                    float orbit = t * kep * spd * gloc * dil * sdir;
+                    float wind = rc * DISK_WIND * 0.055 * diskShape;
+                    float2 fastFlow = rot(diskLocal, -orbit + wind);
+                    float2 slowFlow = rot(diskLocal, -orbit * 0.42 + wind * 0.65);
+                    float phi = atan2(diskLocal.y, diskLocal.x);
+                    float flowPhase = phi * 5.0 + orbit * 2.2 + rc * DISK_WIND * 0.18;
+                    float flowBand = 0.5 + 0.5 * sin(flowPhase + 1.2 * sin(rc * 1.1 - orbit * 0.65));
+                    flowBand = smoothstep(0.18, 0.92, flowBand);
+
+                    float2 grainCoord = fastFlow * diskGrainScale * float2(1.28, 0.72)
+                                      + float2(orbit * 0.10, rc * 0.06) * diskShape;
+                    float grain = matteNoise(grainCoord * 1.18);
+                    float softCloud = matteNoise(slowFlow * diskGrainScale * 0.54 + float2(5.1, -3.7));
+                    float fine = matteNoise(fastFlow * diskGrainScale * 2.15 + float2(-2.4, 1.7));
+                    float curl = matteNoise(fastFlow * diskGrainScale * 0.22 + float2(orbit * 0.018, rc * 0.025));
+                    float matte = softCloud * 0.30 + grain * 0.46 + fine * 0.24
+                                + (curl - 0.5) * 0.08 * diskShape;
+                    float dustContrast = min(DISK_CONTR * lerp(0.055, 0.105, diskShape), 0.30);
+                    float dust = 0.82 + (matte - 0.5) * dustContrast
+                               + (flowBand - 0.5) * 0.18 * diskShape;
+                    dust = clamp(dust, lerp(0.70, 0.62, diskShape), lerp(0.98, 1.08, diskShape));
 
                     float3 gasdir = normalize(cross(nrm, xc)) * sdir;
                     float beta    = clamp(rsqrt(max(2.0 * (rc - 1.0), 0.2)), 0.0, 0.99);
-                    float gfac    = gloc / max(1.0 + beta * dot(gasdir, normalize(v)), 0.05);
-                    gfac = lerp(1.0, gfac, DOPPLER_MIX);
+                    float approach = dot(gasdir, normalize(-v));
+                    float doppler = 1.0 / max(1.0 - beta * approach, 0.05);
+                    float gphys = gloc * doppler;
+                    float gfac = lerp(1.0, gphys, relativityMix);
 
                     float xpr   = max(1.0 - sqrt(rin / rc), 0.0);
                     float tprof = pow(rin / rc, 0.75) * pow(xpr, 0.25) / 0.488;
-                    float3 cbb  = blackbody(DISK_TEMP * tprof * gfac);
+                    float shift01 = saturate((gfac - 0.72) / 0.86);
+                    float3 dopplerTint = lerp(float3(1.16, 0.78, 0.58),
+                                              float3(0.72, 0.90, 1.30),
+                                              shift01);
+                    float gravWarm = saturate((1.0 - gloc) * 1.8) * REDSHIFT_TINT;
+                    float3 gravTint = lerp(float3(1.0, 1.0, 1.0),
+                                           float3(1.10, 0.84, 0.66),
+                                           gravWarm);
+                    float3 cbb  = blackbody(DISK_TEMP * diskTempScale * tprof * gfac) * diskTint;
+                    cbb *= lerp(float3(1.0, 1.0, 1.0), dopplerTint * gravTint, relativityMix * 0.42);
                     float boost = pow(max(gfac, 1e-3), DISK_BEAM);
 
-                    float density = band * streaks;
-                    // 盘光 ×diskPresence：小黑洞阶段无盘，中段渐显，大洞满盘。
-                    emitc += trans * cbb * (DISK_GAIN * 2.2 * density * tprof * tprof * boost * diskPresence);
-                    trans *= 1.0 - clamp(DISK_OPACITY * density * diskPresence, 0.0, 1.0);
+                    float density = band * dust * lerp(0.94, 1.12, flowBand);
+                    // 盘光只由开关/强度决定是否出现；尺寸增长只改变盘半径与流速。
+                    emitc += trans * cbb * (DISK_GAIN * diskGainScale * 2.45 * density * tprof * tprof * boost * diskPresence);
+                    trans *= 1.0 - clamp(DISK_OPACITY * diskOpacityScale * density * diskPresence, 0.0, 1.0);
                 }
             }
             sPrev = s;

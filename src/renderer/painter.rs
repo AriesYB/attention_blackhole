@@ -16,7 +16,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 
 use super::capture::CaptureSource;
-use super::shader::FrameConstants;
+use super::shader::{FrameConstants, ShaderOptions};
 use super::RenderError;
 use crate::controller::Frame;
 use crate::model::state::AppState;
@@ -46,6 +46,16 @@ pub fn paint_frame(
     now_secs: f32,
     resolution: (f32, f32),
 ) -> Result<(), RenderError> {
+    paint_frame_with_options(ctx, frame, now_secs, resolution, ShaderOptions::default())
+}
+
+pub fn paint_frame_with_options(
+    ctx: PaintContext,
+    frame: &Frame,
+    now_secs: f32,
+    resolution: (f32, f32),
+    options: ShaderOptions,
+) -> Result<(), RenderError> {
     // 1. 据状态派生 uniform。
     let load = frame.load as f32 / 100.0;
     let dim = dimming_for_state(frame.state);
@@ -58,7 +68,8 @@ pub fn paint_frame(
     };
 
     // 2. 组 FrameConstants。
-    let consts = FrameConstants::new(load, dim, now_secs, resolution, has_capture);
+    let consts =
+        FrameConstants::new_with_options(load, dim, now_secs, resolution, has_capture, options);
 
     // 3. Map 写 cbuffer（WRITE_DISCARD：不阻塞 GPU 旧帧读）。
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
