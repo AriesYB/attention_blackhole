@@ -71,6 +71,9 @@ pub trait CaptureSource {
     fn current_frame_srv(&mut self) -> Option<ID3D11ShaderResourceView>;
     /// on_target 或 consent 变化时调用：启停捕获会话。
     fn set_active(&mut self, active: bool);
+    /// 冻结当前可采样帧。用于临时允许 overlay 被外部截图/录屏捕获时，
+    /// 避免内部 WGC 把 overlay 自身采进背景形成反馈环。
+    fn set_frame_frozen(&mut self, _frozen: bool) {}
     /// 是否处于「有真实捕获」状态（painter 据此设 u_has_capture）。
     fn has_capture(&self) -> bool;
 }
@@ -129,6 +132,7 @@ pub struct WgcCaptureSource {
     copy_srv: Option<ID3D11ShaderResourceView>,
     copy_size: Option<(u32, u32)>,
     active: bool,
+    frozen: bool,
 }
 
 use std::sync::{Arc, Mutex};
@@ -194,6 +198,10 @@ impl WgcCaptureSource {
         let session = frame_pool
             .CreateCaptureSession(&item)
             .map_err(RenderError::Windows)?;
+        // Windows Graphics Capture defaults to drawing a yellow border around
+        // the captured window/monitor. The black hole is itself the visual
+        // indicator here, so hide that system border when the OS allows it.
+        let _ = session.SetIsBorderRequired(false);
 
         let context = unsafe { device.GetImmediateContext().map_err(RenderError::Windows)? };
 
@@ -208,6 +216,7 @@ impl WgcCaptureSource {
             copy_srv: None,
             copy_size: None,
             active: false,
+            frozen: false,
         })
     }
 
@@ -301,7 +310,9 @@ impl CaptureSource for WgcCaptureSource {
         if !self.active {
             return None;
         }
-        self.update_copy_from_latest();
+        if !self.frozen {
+            self.update_copy_from_latest();
+        }
         self.copy_srv.clone()
     }
 
@@ -322,11 +333,31 @@ impl CaptureSource for WgcCaptureSource {
             self.copy_tex = None;
             self.copy_srv = None;
             self.copy_size = None;
+            self.frozen = false;
         }
     }
 
+    fn set_frame_frozen(&mut self, frozen: bool) {
+        if frozen == self.frozen {
+            return;
+        }
+        if frozen {
+            self.update_copy_from_latest();
+        } else {
+            // Drop frames captured while the overlay was visible to screenshots; the
+            // next normal frame will arrive after display-affinity exclusion is restored.
+            *self.latest.lock().unwrap() = None;
+        }
+        self.frozen = frozen;
+    }
+
     fn has_capture(&self) -> bool {
-        self.active && (self.copy_srv.is_some() || self.latest.lock().unwrap().is_some())
+        self.active
+            && if self.frozen {
+                self.copy_srv.is_some()
+            } else {
+                self.copy_srv.is_some() || self.latest.lock().unwrap().is_some()
+            }
     }
 }
 

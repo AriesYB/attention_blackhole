@@ -65,7 +65,7 @@ mod app {
         SWP_NOZORDER, SWP_SHOWWINDOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
         WM_COMMAND, WM_DESTROY, WM_HSCROLL, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
         WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP,
-        WM_USER, WNDCLASSEXW, WDA_EXCLUDEFROMCAPTURE, WS_CAPTION, WS_CHILD,
+        WM_USER, WNDCLASSEXW, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WS_CAPTION, WS_CHILD,
         WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
         WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
     };
@@ -75,6 +75,7 @@ mod app {
 
     const MENU_LOCK_TOGGLE: usize = 1003;
     const MENU_SETTINGS: usize = 1004;
+    const MENU_SCREENSHOT_TOGGLE: usize = 1005;
     const MENU_EXIT: usize = 1099;
 
     const ID_SIZE: i32 = 2001;
@@ -128,6 +129,7 @@ mod app {
 
         let start = Instant::now();
         let resolution = (screen.width as f32, screen.height as f32);
+        let mut screenshot_visible_applied = false;
         let frame = Frame {
             load: 72.0,
             state: AppState::Working,
@@ -136,6 +138,14 @@ mod app {
 
         while state.running {
             pump_messages(&mut state);
+            if state.screenshot_visible != screenshot_visible_applied {
+                apply_screenshot_visibility(
+                    hwnd,
+                    capture.as_mut(),
+                    state.screenshot_visible,
+                );
+                screenshot_visible_applied = state.screenshot_visible;
+            }
             state.update_center(start.elapsed().as_secs_f32());
 
             let options = state.shader_options();
@@ -184,6 +194,34 @@ mod app {
                 w!("Attention Blackhole"),
                 MB_OK | MB_ICONERROR,
             );
+        }
+    }
+
+    fn apply_screenshot_visibility(
+        hwnd: HWND,
+        capture: &mut dyn CaptureSource,
+        screenshot_visible: bool,
+    ) {
+        if screenshot_visible {
+            let _ = capture.current_frame_srv();
+            capture.set_frame_frozen(true);
+            set_capture_excluded(hwnd, false);
+        } else {
+            set_capture_excluded(hwnd, true);
+            capture.set_frame_frozen(false);
+        }
+    }
+
+    fn set_capture_excluded(hwnd: HWND, excluded: bool) {
+        let affinity = if excluded {
+            WDA_EXCLUDEFROMCAPTURE
+        } else {
+            WDA_NONE
+        };
+        unsafe {
+            if SetWindowDisplayAffinity(hwnd, affinity).is_err() {
+                // Older Windows builds may not support WDA_EXCLUDEFROMCAPTURE.
+            }
         }
     }
 
@@ -246,6 +284,7 @@ mod app {
         screen: ScreenRect,
         running: bool,
         locked: bool,
+        screenshot_visible: bool,
         visual_hwnd: Option<HWND>,
         handle_hwnd: Option<HWND>,
         settings_hwnd: Option<HWND>,
@@ -270,6 +309,7 @@ mod app {
                 screen,
                 running: true,
                 locked: false,
+                screenshot_visible: false,
                 visual_hwnd: None,
                 handle_hwnd: None,
                 settings_hwnd: None,
@@ -344,6 +384,10 @@ mod app {
                 self.end_drag();
             }
             self.sync_handle_window();
+        }
+
+        fn toggle_screenshot_visible(&mut self) {
+            self.screenshot_visible = !self.screenshot_visible;
         }
 
         fn sync_handle_window(&mut self) {
@@ -690,9 +734,7 @@ mod app {
             .map_err(|e| format!("SetLayeredWindowAttributes failed: {e:?}"))?;
         let _ = ShowWindow(hwnd, SW_SHOWNA);
 
-        if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_err() {
-            // Older Windows builds may not support this. The renderer can still run.
-        }
+        set_capture_excluded(hwnd, true);
         Ok(hwnd)
     }
 
@@ -1194,6 +1236,11 @@ mod app {
             } else {
                 append_menu_text(menu, MENU_LOCK_TOGGLE, "锁定拖动");
             }
+            if state.screenshot_visible {
+                append_menu_text(menu, MENU_SCREENSHOT_TOGGLE, "恢复实时捕获");
+            } else {
+                append_menu_text(menu, MENU_SCREENSHOT_TOGGLE, "截图可见");
+            }
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             append_menu_text(menu, MENU_EXIT, "退出");
 
@@ -1235,6 +1282,7 @@ mod app {
                 }
             }
             MENU_LOCK_TOGGLE => state.toggle_lock(),
+            MENU_SCREENSHOT_TOGGLE => state.toggle_screenshot_visible(),
             MENU_EXIT => {
                 state.running = false;
                 unsafe {
